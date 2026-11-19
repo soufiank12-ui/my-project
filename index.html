@@ -41,11 +41,34 @@
 
   <script>
     const colors = ["#f0f4f8", "#ffe0e0", "#e0ffe4", "#e0ecff", "#fff6d6", "#f1e0ff", "#d6fff8"];
+    // نغمة لكل لون (دو، ري، مي، فا، صول، لا، سي)
+    const notes = [261.63, 293.66, 329.63, 349.23, 392.0, 440.0, 493.88];
     let current = 0;
+    let audioCtx = null;
+
+    function playNote(freq) {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        const now = audioCtx.currentTime;
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.3, now + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.4);
+      } catch (e) {
+        // إلا المتصفح ما خدمش الصوت، اللون كيتبدل عادي
+      }
+    }
 
     document.getElementById("colorBtn").addEventListener("click", () => {
       current = (current + 1) % colors.length;
       document.body.style.backgroundColor = colors[current];
+      playNote(notes[current]);
     });
   </script>
 </body>
