@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>شد الكورة</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #0f172a; color: #f8fafc;
+    font-family: -apple-system, system-ui, "Segoe UI", Tahoma, sans-serif;
+    touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
+  #hud {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 24px; font-size: 26px; font-weight: 700; pointer-events: none;
+  }
+  #best { opacity: .7; font-size: 20px; }
+  .overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px;
+    background: rgba(15, 23, 42, .78); text-align: center; padding: 24px;
+  }
+  .hidden { display: none; }
+  .overlay h1 { margin: 0; font-size: 46px; }
+  .overlay p { margin: 0; font-size: 22px; opacity: .85; }
+  .big { font-size: 64px; font-weight: 800; color: #facc15; }
+  button {
+    font: inherit; font-size: 28px; font-weight: 700;
+    padding: 18px 56px; border: 0; border-radius: 999px;
+    background: #22c55e; color: #052e16; cursor: pointer;
+    box-shadow: 0 6px 0 #15803d; touch-action: manipulation;
+  }
+  button:active { transform: translateY(4px); box-shadow: 0 2px 0 #15803d; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><span id="score">النقط: 0</span><span id="best">أحسن: 0</span></div>
+
+<div id="start" class="overlay">
+  <h1>⚽ شد الكورة</h1>
+  <p>حرك اللوحة بصبعك ليمين وليسار باش تشد الكورة</p>
+  <button id="startBtn">بدا</button>
+</div>
+
+<div id="over" class="overlay hidden">
+  <h1>خسرتي!</h1>
+  <p>النقط ديالك</p>
+  <div class="big" id="final">0</div>
+  <p id="bestMsg"></p>
+  <button id="againBtn">عاود</button>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const startEl = document.getElementById('start');
+  const overEl = document.getElementById('over');
+  const finalEl = document.getElementById('final');
+  const bestMsg = document.getElementById('bestMsg');
+
+  let W = 0, H = 0, dpr = 1;
+  let paddle, ball, score, best = 0, running = false, lastT = 0, flash = 0;
+
+  try { best = parseInt(localStorage.getItem('catchBest') || '0', 10) || 0; } catch (e) {}
+  bestEl.textContent = 'أحسن: ' + best;
+
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (paddle) {
+      paddle.w = Math.max(110, W * 0.2);
+      paddle.y = H - 70;
+      paddle.x = Math.min(Math.max(paddle.x, paddle.w / 2), W - paddle.w / 2);
+    }
+    if (!running) draw();
+  }
+
+  function newBall() {
+    const r = Math.max(16, Math.min(W, H) * 0.028);
+    ball = {
+      r,
+      x: r + Math.random() * (W - 2 * r),
+      y: -r,
+      vy: speedFor(score),
+      vx: (Math.random() - 0.5) * Math.min(120 + score * 8, 320)
+    };
+  }
+
+  // Fall speed in px/second: starts gentle, grows a little with every catch.
+  function speedFor(s) { return H * (0.35 + s * 0.04); }
+
+  function reset() {
+    score = 0;
+    paddle = { w: Math.max(110, W * 0.2), h: 22, x: W / 2, y: H - 70 };
+    newBall();
+    scoreEl.textContent = 'النقط: 0';
+  }
+
+  function start() {
+    reset();
+    startEl.classList.add('hidden');
+    overEl.classList.add('hidden');
+    running = true;
+    lastT = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function gameOver() {
+    running = false;
+    finalEl.textContent = score;
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem('catchBest', String(best)); } catch (e) {}
+      bestMsg.textContent = '🎉 رقم قياسي جديد!';
+    } else {
+      bestMsg.textContent = 'أحسن نتيجة: ' + best;
+    }
+    bestEl.textContent = 'أحسن: ' + best;
+    overEl.classList.remove('hidden');
+  }
+
+  function update(dt) {
+    ball.y += ball.vy * dt;
+    ball.x += ball.vx * dt;
+    if (ball.x < ball.r) { ball.x = ball.r; ball.vx = Math.abs(ball.vx); }
+    if (ball.x > W - ball.r) { ball.x = W - ball.r; ball.vx = -Math.abs(ball.vx); }
+
+    const top = paddle.y - paddle.h / 2;
+    const left = paddle.x - paddle.w / 2, right = paddle.x + paddle.w / 2;
+    if (ball.vy > 0 && ball.y + ball.r >= top && ball.y - ball.r <= top + paddle.h &&
+        ball.x + ball.r * 0.5 >= left && ball.x - ball.r * 0.5 <= right) {
+      score++;
+      scoreEl.textContent = 'النقط: ' + score;
+      flash = 1;
+      newBall();
+      return;
+    }
+    if (ball.y - ball.r > H) gameOver();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function draw() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#1e293b'); g.addColorStop(1, '#0f172a');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    if (!paddle || !ball) return;
+
+    if (flash > 0) {
+      ctx.fillStyle = `rgba(34,197,94,${flash * 0.18})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // ball
+    const bg = ctx.createRadialGradient(ball.x - ball.r * .35, ball.y - ball.r * .35, ball.r * .2, ball.x, ball.y, ball.r);
+    bg.addColorStop(0, '#fde68a'); bg.addColorStop(1, '#f97316');
+    ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2); ctx.fill();
+
+    // paddle
+    ctx.fillStyle = flash > 0 ? '#4ade80' : '#38bdf8';
+    roundRect(paddle.x - paddle.w / 2, paddle.y - paddle.h / 2, paddle.w, paddle.h, paddle.h / 2);
+    ctx.fill();
+  }
+
+  function loop(t) {
+    if (!running) return;
+    const dt = Math.min((t - lastT) / 1000, 0.05);
+    lastT = t;
+    update(dt);
+    if (flash > 0) flash = Math.max(0, flash - dt * 3);
+    draw();
+    if (running) requestAnimationFrame(loop);
+  }
+
+  // Touch / pointer control: the paddle follows the finger horizontally.
+  function moveTo(clientX) {
+    if (!paddle) return;
+    paddle.x = Math.min(Math.max(clientX, paddle.w / 2), W - paddle.w / 2);
+  }
+  canvas.addEventListener('touchstart', e => { e.preventDefault(); moveTo(e.touches[0].clientX); }, { passive: false });
+  canvas.addEventListener('touchmove', e => { e.preventDefault(); moveTo(e.touches[0].clientX); }, { passive: false });
+  canvas.addEventListener('mousemove', e => moveTo(e.clientX));
+  document.addEventListener('gesturestart', e => e.preventDefault());
+
+  document.getElementById('startBtn').addEventListener('click', start);
+  document.getElementById('againBtn').addEventListener('click', start);
+  window.addEventListener('resize', resize);
+  resize();
+  reset();
+  draw();
+})();
+</script>
+</body>
+</html>
