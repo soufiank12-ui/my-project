@@ -17,10 +17,17 @@
   canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
   #hud {
     position: fixed; top: 0; left: 0; right: 0;
-    display: flex; justify-content: space-between; align-items: center;
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
     padding: 16px 24px; font-size: 26px; font-weight: 700; pointer-events: none;
   }
-  #best { opacity: .7; font-size: 20px; }
+  #hud .side { display: flex; align-items: center; gap: 18px; }
+  #best, #count { opacity: .7; font-size: 20px; }
+  #musicBtn {
+    pointer-events: auto; font-size: 26px; padding: 8px 16px;
+    background: rgba(255,255,255,.12); color: #f8fafc; box-shadow: none;
+  }
+  #musicBtn.off { opacity: .5; text-decoration: line-through; }
+  #musicBtn:active { transform: none; box-shadow: none; }
   .overlay {
     position: fixed; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 18px;
@@ -37,15 +44,26 @@
     box-shadow: 0 6px 0 #15803d; touch-action: manipulation;
   }
   button:active { transform: translateY(4px); box-shadow: 0 2px 0 #15803d; }
+  #toast {
+    position: fixed; top: 22%; left: 0; right: 0; text-align: center;
+    font-size: 40px; font-weight: 800; color: #facc15; pointer-events: none;
+    opacity: 0; transition: opacity .3s;
+  }
+  #toast.show { opacity: 1; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hud"><span id="score">النقط: 0</span><span id="best">أحسن: 0</span></div>
+<div id="hud">
+  <div class="side"><span id="score">النقط: 0</span><span id="count">الكور: 1</span></div>
+  <div class="side"><span id="best">أحسن: 0</span><button id="musicBtn" aria-label="الموسيقى">🎵</button></div>
+</div>
+<div id="toast">+ كورة جديدة!</div>
 
 <div id="start" class="overlay">
   <h1>⚽ شد الكورة</h1>
-  <p>حرك اللوحة بصبعك ليمين وليسار باش تشد الكورة</p>
+  <p>حرك اللوحة بصبعك ليمين وليسار باش تشد الكور</p>
+  <p>كل 5 نقط كتزاد كورة جديدة، حتى لـ 6</p>
   <button id="startBtn">بدا</button>
 </div>
 
@@ -59,21 +77,145 @@
 
 <script>
 (() => {
+  const POINTS_PER_BALL = 5;   // every N points, one more ball
+  const MAX_BALLS = 6;
+  const BALL_COLORS = [
+    ['#fde68a', '#f97316'], ['#fbcfe8', '#ec4899'], ['#bfdbfe', '#3b82f6'],
+    ['#bbf7d0', '#22c55e'], ['#ddd6fe', '#8b5cf6'], ['#fecaca', '#ef4444']
+  ];
+
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
-  const scoreEl = document.getElementById('score');
-  const bestEl = document.getElementById('best');
-  const startEl = document.getElementById('start');
-  const overEl = document.getElementById('over');
-  const finalEl = document.getElementById('final');
-  const bestMsg = document.getElementById('bestMsg');
+  const $ = id => document.getElementById(id);
+  const scoreEl = $('score'), countEl = $('count'), bestEl = $('best');
+  const startEl = $('start'), overEl = $('over'), finalEl = $('final');
+  const bestMsg = $('bestMsg'), musicBtn = $('musicBtn'), toast = $('toast');
 
   let W = 0, H = 0, dpr = 1;
-  let paddle, ball, score, best = 0, running = false, lastT = 0, flash = 0;
+  let paddle, balls = [], score = 0, best = 0, running = false, lastT = 0, flash = 0;
+  let toastTimer = 0;
 
-  try { best = parseInt(localStorage.getItem('catchBest') || '0', 10) || 0; } catch (e) {}
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  };
+  best = parseInt(store.get('catchBest', '0'), 10) || 0;
   bestEl.textContent = 'أحسن: ' + best;
 
+  // ---------------------------------------------------------------- Audio
+  let ac = null, master = null, sfxGain = null, musicGain = null, noiseBuf = null;
+  let musicOn = store.get('catchMusic', '1') === '1';
+  musicBtn.classList.toggle('off', !musicOn);
+
+  function initAudio() {
+    if (!ac) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      ac = new AC();
+      master = ac.createGain(); master.gain.value = 0.9; master.connect(ac.destination);
+      sfxGain = ac.createGain(); sfxGain.gain.value = 0.5; sfxGain.connect(master);
+      musicGain = ac.createGain(); musicGain.gain.value = musicOn ? 0.22 : 0; musicGain.connect(master);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 0.2, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    if (ac.state === 'suspended') ac.resume().catch(() => {});
+  }
+
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+
+  // One tone with a quick attack and exponential decay.
+  function tone(out, freq, t, dur, type, vol, slideTo) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(out);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+
+  // Catch "pop": climbs a pentatonic scale with the streak, wraps after 2 octaves.
+  const PENTA = [0, 2, 4, 7, 9];
+  function popSound(streak) {
+    if (!ac) return;
+    const i = streak % 11;
+    const midi = 72 + Math.floor(i / 5) * 12 + PENTA[i % 5];
+    const f = mtof(midi), t = ac.currentTime;
+    tone(sfxGain, f * 0.6, t, 0.09, 'sine', 0.6, f * 1.4);
+    tone(sfxGain, f, t + 0.01, 0.12, 'square', 0.12);
+  }
+
+  // New ball: quick rising arpeggio with a sparkle.
+  function newBallSound() {
+    if (!ac) return;
+    const t = ac.currentTime;
+    [72, 76, 79, 84, 88].forEach((m, k) => tone(sfxGain, mtof(m), t + k * 0.06, 0.14, 'square', 0.14));
+    tone(sfxGain, mtof(96), t + 0.3, 0.3, 'triangle', 0.2);
+  }
+
+  // Game over: three falling "wah" notes, the last one drooping.
+  function loseSound() {
+    if (!ac) return;
+    const t = ac.currentTime;
+    tone(sfxGain, mtof(67), t, 0.28, 'square', 0.16);
+    tone(sfxGain, mtof(66), t + 0.3, 0.28, 'square', 0.16);
+    tone(sfxGain, mtof(65), t + 0.6, 0.75, 'square', 0.16, mtof(58));
+  }
+
+  // ---- Chiptune background loop (original tune), 8th-note steps
+  const MELODY = [
+    76, 79, 84, 79, 76, 79, 74, 76,
+    72, 76, 81, 76, 72, 76, 71, 72,
+    69, 72, 77, 72, 69, 72, 76, 77,
+    67, 71, 74, 79, 77, 74, 71, null
+  ];
+  const BASS = [48, 45, 41, 43]; // C, A, F, G (one per bar)
+  let musicTimer = null, nextNoteTime = 0, step = 0;
+
+  function bpm() { return 120 + (balls.length - 1) * 14; }
+
+  function scheduleStep(s, t) {
+    const len = 60 / bpm() / 2;
+    const m = MELODY[s % 32];
+    if (m) tone(musicGain, mtof(m), t, len * 0.9, 'square', 0.18);
+    const root = BASS[Math.floor((s % 32) / 8)];
+    tone(musicGain, mtof(s % 2 ? root + 12 : root), t, len * 0.95, 'triangle', 0.5);
+    if (s % 2 === 1) {             // hi-hat on off-beats
+      const n = ac.createBufferSource(), g = ac.createGain(), hp = ac.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 7000;
+      n.buffer = noiseBuf;
+      g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+      n.connect(hp); hp.connect(g); g.connect(musicGain);
+      n.start(t); n.stop(t + 0.06);
+    }
+  }
+
+  function startMusic() {
+    if (!ac || musicTimer) return;
+    step = 0; nextNoteTime = ac.currentTime + 0.1;
+    musicTimer = setInterval(() => {
+      while (nextNoteTime < ac.currentTime + 0.15) {
+        scheduleStep(step, nextNoteTime);
+        nextNoteTime += 60 / bpm() / 2;
+        step++;
+      }
+    }, 25);
+  }
+  function stopMusic() { clearInterval(musicTimer); musicTimer = null; }
+
+  musicBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    initAudio();
+    musicOn = !musicOn;
+    store.set('catchMusic', musicOn ? '1' : '0');
+    musicBtn.classList.toggle('off', !musicOn);
+    if (musicGain) musicGain.gain.setTargetAtTime(musicOn ? 0.22 : 0, ac.currentTime, 0.05);
+  });
+  musicBtn.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+
+  // ---------------------------------------------------------------- Game
   function resize() {
     dpr = window.devicePixelRatio || 1;
     W = window.innerWidth; H = window.innerHeight;
@@ -87,67 +229,99 @@
     if (!running) draw();
   }
 
-  function newBall() {
+  // Fall speed in px/second, shared by all balls so their spacing stays the same.
+  function speed() { return Math.min(H * (0.32 + score * 0.012), H * 1.0); }
+
+  // Put a ball at the top, spaced above whichever ball is highest,
+  // so balls come down one after another rather than together.
+  function spawn(ball) {
     const r = Math.max(16, Math.min(W, H) * 0.028);
-    ball = {
-      r,
-      x: r + Math.random() * (W - 2 * r),
-      y: -r,
-      vy: speedFor(score),
-      vx: (Math.random() - 0.5) * Math.min(120 + score * 8, 320)
-    };
+    const others = balls.filter(b => b !== ball);
+    const gap = Math.max(H * 0.24, speed() * 0.5);
+    let y = -r;
+    for (const b of others) y = Math.min(y, b.y - gap);
+    ball.r = r;
+    ball.x = r + Math.random() * (W - 2 * r);
+    ball.y = y;
+    ball.vx = (Math.random() - 0.5) * Math.min(60 + score * 3, 180);
+    return ball;
   }
 
-  // Fall speed in px/second: starts gentle, grows a little with every catch.
-  function speedFor(s) { return H * (0.35 + s * 0.04); }
+  function addBall() {
+    const b = { color: BALL_COLORS[balls.length % BALL_COLORS.length] };
+    balls.push(b);
+    spawn(b);
+    countEl.textContent = 'الكور: ' + balls.length;
+  }
 
   function reset() {
-    score = 0;
+    score = 0; balls = [];
     paddle = { w: Math.max(110, W * 0.2), h: 22, x: W / 2, y: H - 70 };
-    newBall();
+    addBall();
     scoreEl.textContent = 'النقط: 0';
   }
 
   function start() {
+    initAudio();
     reset();
     startEl.classList.add('hidden');
     overEl.classList.add('hidden');
     running = true;
     lastT = performance.now();
+    startMusic();
     requestAnimationFrame(loop);
   }
 
   function gameOver() {
     running = false;
+    stopMusic();
+    loseSound();
     finalEl.textContent = score;
     if (score > best) {
       best = score;
-      try { localStorage.setItem('catchBest', String(best)); } catch (e) {}
+      store.set('catchBest', String(best));
       bestMsg.textContent = '🎉 رقم قياسي جديد!';
     } else {
       bestMsg.textContent = 'أحسن نتيجة: ' + best;
     }
     bestEl.textContent = 'أحسن: ' + best;
-    overEl.classList.remove('hidden');
+    setTimeout(() => overEl.classList.remove('hidden'), 350);
+  }
+
+  function showToast() {
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 1100);
   }
 
   function update(dt) {
-    ball.y += ball.vy * dt;
-    ball.x += ball.vx * dt;
-    if (ball.x < ball.r) { ball.x = ball.r; ball.vx = Math.abs(ball.vx); }
-    if (ball.x > W - ball.r) { ball.x = W - ball.r; ball.vx = -Math.abs(ball.vx); }
-
+    const vy = speed();
     const top = paddle.y - paddle.h / 2;
     const left = paddle.x - paddle.w / 2, right = paddle.x + paddle.w / 2;
-    if (ball.vy > 0 && ball.y + ball.r >= top && ball.y - ball.r <= top + paddle.h &&
-        ball.x + ball.r * 0.5 >= left && ball.x - ball.r * 0.5 <= right) {
-      score++;
-      scoreEl.textContent = 'النقط: ' + score;
-      flash = 1;
-      newBall();
-      return;
+
+    for (const b of balls) {
+      b.y += vy * dt;
+      b.x += b.vx * dt;
+      if (b.x < b.r) { b.x = b.r; b.vx = Math.abs(b.vx); }
+      if (b.x > W - b.r) { b.x = W - b.r; b.vx = -Math.abs(b.vx); }
+
+      if (b.y + b.r >= top && b.y - b.r <= top + paddle.h &&
+          b.x + b.r * 0.5 >= left && b.x - b.r * 0.5 <= right) {
+        score++;
+        scoreEl.textContent = 'النقط: ' + score;
+        flash = 1;
+        popSound(score - 1);
+        spawn(b);
+        const wanted = Math.min(MAX_BALLS, 1 + Math.floor(score / POINTS_PER_BALL));
+        if (balls.length < wanted) {
+          addBall();
+          newBallSound();
+          showToast();
+        }
+        continue;
+      }
+      if (b.y - b.r > H) { gameOver(); return; }
     }
-    if (ball.y - ball.r > H) gameOver();
   }
 
   function roundRect(x, y, w, h, r) {
@@ -164,27 +338,28 @@
     const g = ctx.createLinearGradient(0, 0, 0, H);
     g.addColorStop(0, '#1e293b'); g.addColorStop(1, '#0f172a');
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-    if (!paddle || !ball) return;
+    if (!paddle) return;
 
     if (flash > 0) {
-      ctx.fillStyle = `rgba(34,197,94,${flash * 0.18})`;
+      ctx.fillStyle = `rgba(34,197,94,${flash * 0.15})`;
       ctx.fillRect(0, 0, W, H);
     }
 
-    // ball
-    const bg = ctx.createRadialGradient(ball.x - ball.r * .35, ball.y - ball.r * .35, ball.r * .2, ball.x, ball.y, ball.r);
-    bg.addColorStop(0, '#fde68a'); bg.addColorStop(1, '#f97316');
-    ctx.fillStyle = bg;
-    ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2); ctx.fill();
+    for (const b of balls) {
+      if (b.y + b.r < 0) continue;
+      const bg = ctx.createRadialGradient(b.x - b.r * .35, b.y - b.r * .35, b.r * .2, b.x, b.y, b.r);
+      bg.addColorStop(0, b.color[0]); bg.addColorStop(1, b.color[1]);
+      ctx.fillStyle = bg;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+    }
 
-    // paddle
     ctx.fillStyle = flash > 0 ? '#4ade80' : '#38bdf8';
     roundRect(paddle.x - paddle.w / 2, paddle.y - paddle.h / 2, paddle.w, paddle.h, paddle.h / 2);
     ctx.fill();
   }
 
   function loop(t) {
-    if (!running) return;
+    if (!running) { draw(); return; }
     const dt = Math.min((t - lastT) / 1000, 0.05);
     lastT = t;
     update(dt);
@@ -203,8 +378,8 @@
   canvas.addEventListener('mousemove', e => moveTo(e.clientX));
   document.addEventListener('gesturestart', e => e.preventDefault());
 
-  document.getElementById('startBtn').addEventListener('click', start);
-  document.getElementById('againBtn').addEventListener('click', start);
+  $('startBtn').addEventListener('click', start);
+  $('againBtn').addEventListener('click', start);
   window.addEventListener('resize', resize);
   resize();
   reset();
