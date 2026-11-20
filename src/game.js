@@ -57,6 +57,60 @@
     for (const k in keys) keys[k] = false;
     if (G.state === 'playing') G.paused = true;
   });
+  // ------------------------------------------------------------ touch controls
+  // On-screen buttons feed the same key table as the keyboard.
+  const touchEl = document.getElementById('touch');
+  function virtualKey(code, down) {
+    if (down && !keys[code]) pressed[code] = true;
+    keys[code] = down;
+  }
+  function enableTouch() {
+    if (document.body.classList.contains('touch')) return;
+    document.body.classList.add('touch');
+  }
+  if (window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0) enableTouch();
+  window.addEventListener('touchstart', enableTouch, { passive: true });
+  touchEl.querySelectorAll('[data-key]').forEach((btn) => {
+    const code = btn.dataset.key;
+    const ids = new Set();
+    const up = (e) => {
+      ids.delete(e.pointerId);
+      if (ids.size === 0) {
+        btn.classList.remove('down');
+        virtualKey(code, false);
+      }
+    };
+    btn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      A.init();
+      ids.add(e.pointerId);
+      try {
+        btn.setPointerCapture(e.pointerId);
+      } catch (err) {}
+      btn.classList.add('down');
+      virtualKey(code, true);
+    });
+    btn.addEventListener('pointerup', up);
+    btn.addEventListener('pointercancel', up);
+    btn.addEventListener('lostpointercapture', up);
+    btn.addEventListener('contextmenu', (e) => e.preventDefault());
+  });
+  // stop iOS from scrolling / zooming / selecting while playing
+  for (const ev of ['touchmove', 'gesturestart', 'dblclick']) {
+    document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+  }
+  let touchUIState = '';
+  function syncTouchUI() {
+    const st = G.state === 'playing' || G.state === 'dying' ? (G.paused ? 'paused' : 'play') : 'off';
+    if (st === touchUIState) return;
+    touchUIState = st;
+    touchEl.className = st;
+    if (st !== 'play') for (const b of touchEl.querySelectorAll('[data-key]')) {
+      b.classList.remove('down');
+      keys[b.dataset.key] = false;
+    }
+  }
+
   const inp = {
     left: () => keys.ArrowLeft || keys.KeyA,
     right: () => keys.ArrowRight || keys.KeyD,
@@ -612,10 +666,14 @@
     }
   }
 
-  function update(dt) {
+  // One-shot menu keys: handled once per frame, outside the physics sub-steps.
+  function handleMetaKeys() {
     if (pressed.KeyM) A.setMuted(!A.muted);
     if ((pressed.Escape || pressed.KeyP) && G.state === 'playing') G.paused = !G.paused;
     if (pressed.Enter && G.state === 'menu') startGame();
+  }
+
+  function update(dt) {
     if (G.paused) {
       A.setWind(0);
       return;
@@ -1120,6 +1178,7 @@
   function drawTexts() {
     if (G.state === 'menu') return;
     const hx = hero.x + hero.w / 2;
+    const isTouch = document.body.classList.contains('touch');
     ctx.font = '600 22px Cairo, Tahoma, sans-serif';
     ctx.textAlign = 'center';
     ctx.direction = 'rtl';
@@ -1130,7 +1189,7 @@
       ctx.fillStyle = `rgba(242,205,150,${a * 0.85})`;
       ctx.shadowColor = 'rgba(255,140,40,0.6)';
       ctx.shadowBlur = 12;
-      ctx.fillText(tx.t, tx.x + 40, 300);
+      ctx.fillText(isTouch && tx.tt ? tx.tt : tx.t, tx.x + 40, 300);
     }
     ctx.shadowBlur = 0;
   }
@@ -1216,7 +1275,7 @@
       ctx.direction = 'ltr';
       ctx.font = '700 13px Cairo, Tahoma, sans-serif';
       ctx.fillStyle = ready ? '#ffd38a' : 'rgba(242,199,122,0.45)';
-      ctx.fillText('E', cx, cy + 5);
+      ctx.fillText(document.body.classList.contains('touch') ? '☀' : 'E', cx, cy + 5);
       ctx.direction = 'rtl';
       ctx.textAlign = 'right';
       ctx.font = '600 15px Cairo, Tahoma, sans-serif';
@@ -1249,7 +1308,7 @@
       ctx.fillText('إيقاف مؤقت', W / 2, H / 2);
       ctx.font = '500 20px Cairo, Tahoma, sans-serif';
       ctx.fillStyle = 'rgba(242,214,168,0.8)';
-      ctx.fillText('اضغط Esc للمتابعة', W / 2, H / 2 + 44);
+      ctx.fillText(document.body.classList.contains('touch') ? 'المس زر ▶ للمتابعة' : 'اضغط Esc للمتابعة', W / 2, H / 2 + 44);
     }
   }
 
@@ -1271,7 +1330,10 @@
     if (dt > 0.05) dt = 0.05;
     // two physics sub-steps keep collisions solid at low frame rates
     const steps = dt > 1 / 70 ? 2 : 1;
+    handleMetaKeys();
     for (let i = 0; i < steps; i++) update(dt / steps);
+    pressed = {};
+    syncTouchUI();
     render();
     requestAnimationFrame(frame);
   }

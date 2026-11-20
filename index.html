@@ -2,7 +2,9 @@
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <title>رجل الشمعة — Candle Man</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -24,8 +26,21 @@
           <li><kbd>مسافة</kbd> القفز</li>
           <li><kbd>E</kbd> أو <kbd>Shift</kbd> تقوية الضوء</li>
           <li><kbd>Esc</kbd> إيقاف مؤقت · <kbd>M</kbd> الصوت</li>
+          <li class="touch-only">على الآيباد: أزرار الحركة يساراً، والقفز وتقوية الضوء يميناً</li>
         </ul>
       </div>
+    </div>
+
+    <div id="touch" class="off">
+      <div class="pad left">
+        <button class="tbtn" data-key="ArrowLeft" aria-label="يسار">◀</button>
+        <button class="tbtn" data-key="ArrowRight" aria-label="يمين">▶</button>
+      </div>
+      <div class="pad right">
+        <button class="tbtn boost" data-key="KeyE" aria-label="تقوية الضوء">☀</button>
+        <button class="tbtn jump" data-key="Space" aria-label="قفز">⤒</button>
+      </div>
+      <button class="tbtn pause" data-key="Escape" aria-label="إيقاف مؤقت">❚❚</button>
     </div>
 
     <div id="endScreen" class="overlay">
@@ -38,6 +53,8 @@
       </div>
     </div>
   </div>
+
+  <div id="rotate">أدِر الجهاز أفقياً للعب ↻</div>
 
   <script src="src/util.js"></script>
   <script src="src/audio.js"></script>
