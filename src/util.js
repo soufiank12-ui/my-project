@@ -2,6 +2,7 @@
 (function () {
   const CM = (window.CM = window.CM || {});
   const U = (CM.util = {});
+  CM.GY = 600; // ground height (world px) — shared by drawing and level code
 
   U.clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   U.lerp = (a, b, t) => a + (b - a) * t;

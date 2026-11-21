@@ -21,6 +21,8 @@
   const BOOST_COOLDOWN = 5;
   const EMBER_GAIN = 20;
   const BASE_ZOOM = 1.3; // the camera sits close, like a miniature lit by a candle
+  const CLIMB_SPEED = 115;
+  const DARKNESS = 0.955;
 
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
@@ -127,7 +129,7 @@
     playTime: 0,
     deaths: 0,
     cam: { x: 0, y: 0, z: 1, look: 0 },
-    darkAlpha: 0.985,
+    darkAlpha: 0.95,
     life: 0,
     wave: -1,
     endT: 0,
@@ -174,6 +176,11 @@
       fx: x,
       fy: y,
       lightR: 200,
+      climb: null,
+      climbPh: 0,
+      pose: null,
+      poseT: 0,
+      out: false,
     };
   }
 
@@ -185,7 +192,7 @@
     G.time = 0;
     G.playTime = 0;
     G.deaths = 0;
-    G.darkAlpha = 0.985;
+    G.darkAlpha = DARKNESS;
     G.life = 0;
     G.wave = -1;
     G.endT = 0;
@@ -274,9 +281,10 @@
 
   // ------------------------------------------------------------ hero physics
   function moveAndCollide(h, dt) {
+    const prevBottom = h.y + h.h;
     h.x += h.vx * dt;
     for (const s of L.solids) {
-      if (!overlap(h, s)) continue;
+      if (s.kind === 'ledge' || !overlap(h, s)) continue;
       if (h.vx > 0) h.x = s.x - h.w;
       else if (h.vx < 0) h.x = s.x + s.w;
       else h.x = h.x + h.w / 2 < s.x + s.w / 2 ? s.x - h.w : s.x + s.w;
@@ -286,6 +294,7 @@
     h.onGround = false;
     for (const s of L.solids) {
       if (!overlap(h, s)) continue;
+      if (s.kind === 'ledge' && (h.vy < 0 || prevBottom > s.y + 1)) continue; // one-way branch
       if (h.vy >= 0) {
         h.y = s.y - h.h;
         h.onGround = true;
@@ -293,6 +302,55 @@
         h.y = s.y + s.h;
       }
       h.vy = 0;
+    }
+  }
+
+  // ------------------------------------------------------------ climbing
+  // Near a rock's side (facing it) or a tree trunk + jump = grab and climb to the top.
+  function findClimb(h, dir) {
+    const cx = h.x + h.w / 2;
+    for (const r of L.rocks) {
+      if (h.y + h.h <= r.y + 6 || h.y >= r.y + r.h) continue;
+      if ((h.facing === 1 || dir === 1) && Math.abs(h.x + h.w - r.x) <= 6) return { kind: 'rock', obj: r, side: 1, top: r.y, x: r.x - h.w, t: 0 };
+      if ((h.facing === -1 || dir === -1) && Math.abs(h.x - (r.x + r.w)) <= 6) return { kind: 'rock', obj: r, side: -1, top: r.y, x: r.x + r.w, t: 0 };
+    }
+    for (const tr of L.trees) {
+      if (Math.abs(cx - tr.x) > 18 || h.y + h.h <= tr.ledge.y + 2) continue;
+      return { kind: 'tree', obj: tr, side: h.facing, top: tr.ledge.y, x: tr.x - h.w / 2, t: 0 };
+    }
+    return null;
+  }
+
+  function updateClimb(h, dt) {
+    const c = h.climb;
+    c.t += dt;
+    h.vx = 0;
+    h.vy = 0;
+    h.onGround = false;
+    // jump again = push off the wall
+    if (h.jumpBuf > 0 && c.t > 0.2) {
+      h.jumpBuf = 0;
+      h.climb = null;
+      h.vy = -JUMP_V * 0.75;
+      if (c.kind === 'rock') {
+        h.facing = -c.side;
+        h.vx = -c.side * 230;
+      }
+      A.jump();
+      return;
+    }
+    h.x = U.approach(h.x, c.x, dt * 220);
+    h.y -= CLIMB_SPEED * dt;
+    h.climbPh += dt * 7;
+    if (Math.random() < dt * 6) burst(h.x + h.w / 2 + c.side * 12, h.y + 20, 1, 'dust', { speed: 30, life: 0.5, size: 1.6, g: 300 });
+    if (h.y + h.h <= c.top) {
+      // reached the top: pull up and stand on it
+      h.y = c.top - h.h;
+      if (c.kind === 'rock') h.x = c.side === 1 ? c.obj.x + 3 : c.obj.x + c.obj.w - h.w - 3;
+      h.onGround = true;
+      h.climb = null;
+      h.squash = 0.45;
+      A.land(0.3);
     }
   }
 
@@ -307,6 +365,30 @@
     let dir = 0;
     if (controllable) dir = (inp.right() ? 1 : 0) - (inp.left() ? 1 : 0);
     if (G.state === 'ending') dir = cxh < L.brazier.x - 66 ? 1 : 0;
+    if (controllable && inp.jumpP()) h.jumpBuf = 0.13;
+    else h.jumpBuf -= dt;
+
+    // boost pose: arms wide for a moment
+    h.poseT -= dt;
+    h.pose = (h.poseT > 0 || h.reach > 0.3) && h.onGround && !h.climb ? 'boost' : null;
+    if (h.pose && G.state === 'playing') dir = 0;
+
+    if (!h.climb && controllable && h.jumpBuf > 0) {
+      const c = findClimb(h, dir);
+      if (c) {
+        h.climb = c;
+        h.jumpBuf = 0;
+        if (c.kind === 'rock') h.facing = c.side;
+        h.squash = -0.3;
+        A.jump();
+      }
+    }
+    if (h.climb) {
+      updateClimb(h, dt);
+      h.walkAmt = 0;
+      h.squash = U.approach(h.squash, 0, dt * 5);
+      return finishHeroUpdate(h, dt, controllable, push, safe, w);
+    }
     if (dir) h.facing = dir;
 
     const windV = -WIND_SPEED * push;
@@ -316,8 +398,6 @@
 
     // jumping with coyote time + input buffer
     h.coyote = h.onGround ? 0.1 : h.coyote - dt;
-    if (controllable && inp.jumpP()) h.jumpBuf = 0.13;
-    else h.jumpBuf -= dt;
     if (h.jumpBuf > 0 && h.coyote > 0) {
       h.vy = -JUMP_V;
       h.coyote = 0;
@@ -344,7 +424,10 @@
     const moving = h.onGround && Math.abs(h.vx) > 25 ? 1 : 0;
     h.walkAmt = U.approach(h.walkAmt, moving, dt * 6);
     h.walkPh += dt * Math.abs(h.vx) * 0.06;
+    finishHeroUpdate(h, dt, controllable, push, safe, w);
+  }
 
+  function finishHeroUpdate(h, dt, controllable, push, safe, w) {
     // wind drains the flame and bends it
     if (push > 0 && G.state === 'playing') h.flame -= WIND_DRAIN * push * dt;
     const visWind = Math.max(push, safe ? w.I * 0.25 : 0);
@@ -359,6 +442,7 @@
         h.boostT = BOOST_TIME;
         h.boostCd = BOOST_COOLDOWN;
         h.flame -= BOOST_COST;
+        if (h.onGround && !h.climb) h.poseT = 0.6;
         A.boost();
         burst(h.fx, h.fy - 10, 26, 'spark', { speed: 260, life: 0.9, size: 1.8 });
       } else if (h.boostCd > 0) {
@@ -390,6 +474,8 @@
     G.dieT = 0;
     G.deaths++;
     hero.flame = 0;
+    hero.out = true;
+    hero.climb = null;
     hero.boostT = 0;
     A.death();
     burst(hero.fx, hero.fy, 24, 'smoke', { ang: -Math.PI / 2, spread: 1.2, speed: 40, life: 2, size: 8 });
@@ -403,6 +489,8 @@
     h.y = GY - h.h;
     h.vx = h.vy = 0;
     h.flame = 100;
+    h.out = false;
+    h.climb = null;
     h.flameShown = 100;
     h.boostT = 0;
     h.boostCd = 0;
@@ -564,7 +652,7 @@
     }
     // flame sparks
     if (hero.flameSize > 6 && Math.random() < dt * (3 + hero.boostA * 14)) {
-      spawn({ type: 'spark', x: hero.fx + (Math.random() - 0.5) * 6, y: hero.fy - hero.flameSize * 0.6, vx: (Math.random() - 0.5) * 30 - hero.windLean * 80, vy: -40 - Math.random() * 60, life: 1, max: 1, s: 0.9 + Math.random() });
+      spawn({ type: 'spark', x: hero.fx + (Math.random() - 0.5) * 6, y: hero.fy - 14, vx: (Math.random() - 0.5) * 30 - hero.windLean * 80, vy: -40 - Math.random() * 60, life: 1, max: 1, s: 0.9 + Math.random() });
     }
     // floating dust motes (screen-space, wrapped around the camera)
     const vw = W / G.cam.z;
@@ -596,7 +684,9 @@
     c.z = snap ? tz : U.lerp(c.z, tz, Math.min(1, dt * 3));
     const vw = W / c.z;
     const vh = H / c.z;
-    tx = U.clamp(tx, -40, L.width + 60 - vw);
+    // on the menu the candle man stands a little left of centre, below the title
+    if (G.state === 'menu') tx = h.x + h.w / 2 - vw * 0.3;
+    else tx = U.clamp(tx, -40, L.width + 60 - vw);
     const ty = GY - vh * 0.83;
     if (snap) {
       c.x = tx;
@@ -632,7 +722,7 @@
     }
     b.flameA = U.smooth(0.85, 2.2, e);
     G.wave = e < 1.6 ? -1 : U.easeOut((e - 1.6) / 7) * 5200;
-    G.darkAlpha = 0.985 * (1 - U.smooth(1.8, 6.8, e));
+    G.darkAlpha = DARKNESS * (1 - U.smooth(1.8, 6.8, e));
     G.life = U.smooth(2.2, 8.5, e);
     if (e > 2 && !G.bloomPlayed) {
       G.bloomPlayed = true;
@@ -679,6 +769,7 @@
       return;
     }
     G.time += dt;
+    CM.now = G.time;
     G.stageT += dt;
     G.flash = Math.max(0, G.flash - dt);
     G.hurtShake = Math.max(0, G.hurtShake - dt);
@@ -779,26 +870,39 @@
     ctx.fillRect(0, 0, W, H);
   }
 
-  function drawHills(par, baseY, amp, freq, deadCol, liveCol, seed) {
-    const life = G.life;
+  // Painted parallax layer: tiles an image (mirrored copies) across the view.
+  function drawLayer(im, par, height, bottom, alpha) {
+    if (!im || !im.width || alpha <= 0.01) return;
     const z = G.cam.z;
-    ctx.setTransform(S, 0, 0, S, 0, 0);
-    ctx.fillStyle = U.mix(deadCol, liveCol, life);
-    ctx.beginPath();
-    ctx.moveTo(0, H);
-    for (let sx = 0; sx <= W + 20; sx += 20) {
-      const wx = sx / z + G.cam.x * par;
-      const y = baseY + Math.sin(wx * freq + seed) * amp + Math.sin(wx * freq * 2.7 + seed * 2) * amp * 0.4;
-      ctx.lineTo(sx, H - (H - y) * (0.6 + 0.4 * z));
-    }
-    ctx.lineTo(W, H);
-    ctx.closePath();
-    ctx.fill();
+    ctx.setTransform(z * S, 0, 0, z * S, -G.cam.x * par * z * S, -G.cam.y * z * S);
+    const w = im.width * (height / im.height);
+    const from = G.cam.x * par - 10;
+    const to = from + W / z + 20;
+    ctx.globalAlpha = alpha;
+    CM.tileMirrored(ctx, im, 0, bottom - height, w, height, from, to);
+    ctx.globalAlpha = 1;
   }
 
   function drawBackground() {
     drawSky();
+    const I = CM.img;
+    const dead = 1 - G.life;
+    // the living forest (end scene) rises behind everything
+    if (G.life > 0.01 && CM.forestFaded) {
+      const par = 0.35;
+      const z = G.cam.z;
+      ctx.setTransform(z * S, 0, 0, z * S, -G.cam.x * par * z * S, -G.cam.y * z * S);
+      const im = CM.forestFaded;
+      const hh = 470;
+      const w = im.width * (hh / im.height);
+      ctx.globalAlpha = G.life;
+      ctx.drawImage(im, L.brazier.x * par - w * 0.42, GY + 30 - hh, w, hh);
+      ctx.globalAlpha = 1;
+    }
+    drawLayer(I.bg_far, 0.18, 330, GY - 10, dead);
+    drawLayer(I.bg_mid, 0.45, 290, GY + 12, dead);
     if (G.life > 0.01) {
+      setScreen(ctx);
       // birds
       ctx.strokeStyle = `rgba(40,40,50,${0.7 * G.life})`;
       ctx.lineWidth = 1.6;
@@ -812,36 +916,21 @@
         ctx.stroke();
       }
     }
-    drawHills(0.15, 430, 40, 0.0035, '#0f0906', '#7fa6a0', 1);
-    drawHills(0.3, 480, 34, 0.006, '#110a06', '#5f8d62', 4);
-    // parallax dead forest
-    const par = 0.6;
-    const z = G.cam.z;
-    ctx.setTransform(z * S, 0, 0, z * S, -G.cam.x * par * z * S, (-G.cam.y * z + 40 * (1 - z)) * S);
-    ctx.save();
-    ctx.globalAlpha = 0.85;
-    const x0 = G.cam.x * par - 200;
-    const x1 = x0 + W / z + 400;
-    for (const t of L.bgTrees) {
-      if (t.x < x0 || t.x > x1) continue;
-      const wl = G.wave < 0 ? 0 : U.clamp((G.wave - Math.abs(t.x / par - L.brazier.x)) / 700, 0, 1);
-      D.tree(ctx, t, Math.min(G.life, wl), true);
-    }
-    ctx.restore();
-    drawHills(0.75, 640, 8, 0.01, '#0d0805', '#3b5a2c', 7);
   }
 
   function drawWorld() {
     const t = G.time;
     const h = hero;
     setWorld(ctx);
-    for (const tr of L.trees) if (inView(tr.x - 200, tr.x + 200)) D.tree(ctx, tr, localLife(tr.x), false);
-    for (const lg of L.logs) if (inView(lg.x1 - 60, lg.x2 + 60)) D.log(ctx, lg, localLife((lg.x1 + lg.x2) / 2));
-    for (const g of L.grounds) if (inView(g.x, g.x + g.w)) D.ground(ctx, g, localLife(U.clamp(L.brazier.x, g.x, g.x + g.w)));
-    for (const s of L.stumps) if (inView(s.x, s.x + s.w, 20)) D.stump(ctx, s, localLife(s.x));
-    for (const r of L.rocks) if (inView(r.x, r.x + r.w, 20)) D.rock(ctx, r, h.fx, localLife(r.x));
+    for (const tr of L.trees) if (inView(tr.x - 260, tr.x + 260)) D.tree(ctx, tr, 1 - localLife(tr.x));
+    // the pits stay dark, whatever is painted behind them
+    ctx.fillStyle = '#070403';
+    ctx.fillRect(G.cam.x - 50, GY + 2, W / G.cam.z + 100, 600);
+    for (const lg of L.logs) if (inView(lg.x1 - 60, lg.x2 + 60)) D.log(ctx, lg);
+    for (const g of L.grounds) if (inView(g.x, g.x + g.w)) D.ground(ctx, g);
+    for (const r of L.rocks) if (inView(r.x - 30, r.x + r.w + 30)) D.rock(ctx, r);
 
-    // grass (dry stubble that grows green) and flowers
+    // fresh grass and flowers sprout when the light returns
     ctx.lineCap = 'round';
     const gx0 = G.cam.x - 20;
     const gx1 = G.cam.x + W / G.cam.z + 20;
@@ -849,8 +938,9 @@
     for (const b of L.grass) {
       if (b.x < gx0 || b.x > gx1) continue;
       const ll = localLife(b.x);
-      const hh = U.lerp(b.dead, b.h, ll);
-      ctx.strokeStyle = ll > 0 ? U.mix('#4a3826', b.col, ll) : '#3f3022';
+      if (ll <= 0) continue;
+      const hh = b.h * ll;
+      ctx.strokeStyle = b.col;
       ctx.beginPath();
       ctx.moveTo(b.x, GY + 1);
       ctx.quadraticCurveTo(b.x, GY - hh * 0.5, b.x + b.lean * hh, GY - hh);
@@ -884,8 +974,8 @@
       }
     }
 
-    for (const cp of L.checkpoints) if (inView(cp.x - 20, cp.x + 20)) D.candle(ctx, cp, t);
-    if (inView(L.brazier.x - 60, L.brazier.x + 60)) D.brazier(ctx, L.brazier, localLife(L.brazier.x));
+    for (const cp of L.checkpoints) if (inView(cp.x - 20, cp.x + 20)) D.candle(ctx, cp);
+    if (inView(L.brazier.x - 80, L.brazier.x + 80)) D.brazier(ctx, L.brazier);
 
     // drip spots and drops
     for (const em of L.drips) {
@@ -967,7 +1057,7 @@
     const h = hero;
     const R = h.lightR * G.lightFade;
     const fx = h.fx;
-    const fy = h.fy - h.flameSize * 0.35;
+    const fy = h.fy;
     if (R > 2) {
       l.globalCompositeOperation = 'destination-out';
       punch(l, fx, fy, R, 1);
@@ -982,24 +1072,19 @@
       l.clip();
       l.fillStyle = `rgba(8,5,3,${da * 0.8})`;
       for (const r of L.rocks) if (Math.abs(r.x + r.w / 2 - fx) < R + 60) castShadow(l, r.pts, fx, fy);
-      for (const s of L.stumps) {
-        if (Math.abs(s.x + s.w / 2 - fx) < R + 60) {
-          castShadow(l, [[s.x, s.y + 2], [s.x + s.w, s.y + 2], [s.x + s.w, s.y + s.h], [s.x, s.y + s.h]], fx, fy);
-        }
-      }
       l.restore();
     }
     l.globalCompositeOperation = 'destination-out';
     for (const cp of L.checkpoints) {
       if (!cp.lit) continue;
       const k = U.smooth(0, 0.6, cp.litT);
-      punch(l, cp.x, GY - 50, (150 + Math.sin(G.time * 9 + cp.x) * 5) * k, 0.95);
+      punch(l, cp.x, D.candleFlameY, (150 + Math.sin(G.time * 9 + cp.x) * 5) * k, 0.95);
     }
     for (const e of L.embers) if (!e.taken) punch(l, e.x, e.y, 55, 0.6);
     const b = L.brazier;
-    if (b.lit) punch(l, b.x, GY - 120, 320 * b.flameA + Math.max(0, G.wave) * 1.3, 1);
+    if (b.lit) punch(l, b.x, D.brazierFireY, 320 * b.flameA + Math.max(0, G.wave) * 1.3, 1);
     // unlit brazier: a faint, inviting glint
-    else punch(l, b.x, GY - 82, 40, 0.18 + 0.06 * Math.sin(G.time * 2));
+    else punch(l, b.x, GY - 70, 60, 0.22 + 0.06 * Math.sin(G.time * 2));
     l.globalCompositeOperation = 'source-over';
     return true;
   }
@@ -1015,7 +1100,7 @@
     if (R > 2) {
       ctx.save();
       ctx.globalCompositeOperation = 'overlay';
-      const fy = h.fy - h.flameSize * 0.35;
+      const fy = h.fy;
       const g = ctx.createRadialGradient(h.fx, fy, 0, h.fx, fy, R * 1.1);
       g.addColorStop(0, 'rgba(255,150,50,0.55)');
       g.addColorStop(0.6, 'rgba(200,100,30,0.3)');
@@ -1053,19 +1138,19 @@
 
     for (const e of L.embers) if (!e.taken && inView(e.x - 20, e.x + 20)) D.ember(ctx, e, t);
 
+    // flickering glow over the painted flames
     for (const cp of L.checkpoints) {
       if (!cp.lit || !inView(cp.x - 40, cp.x + 40)) continue;
-      D.flame(ctx, cp.x + 0.5, GY - 40, 15 * U.smooth(0, 0.5, cp.litT), Math.sin(t * 1.3 + cp.x) * 0.1, t, cp.x);
+      glow(cp.x, D.candleFlameY - 4, 26 * (1 + 0.08 * Math.sin(t * 15 + cp.x)), 0.5 * U.smooth(0, 0.5, cp.litT));
     }
     const b = L.brazier;
     if (b.lit && inView(b.x - 120, b.x + 120)) {
-      D.flame(ctx, b.x - 14, GY - 80, 60 * b.flameA, -0.1, t, 1);
-      D.flame(ctx, b.x + 14, GY - 80, 55 * b.flameA, 0.12, t, 2);
-      D.flame(ctx, b.x, GY - 80, 95 * b.flameA, 0, t, 3);
+      glow(b.x, D.brazierFireY + 5, 95 * (1 + 0.06 * Math.sin(t * 11) + 0.04 * Math.sin(t * 27)), 0.55 * b.flameA);
+      if (Math.random() < 0.5) spawn({ type: 'spark', x: b.x + (Math.random() - 0.5) * 50, y: D.brazierFireY, vx: (Math.random() - 0.5) * 40, vy: -60 - Math.random() * 80, life: 1.2, max: 1.2, s: 1 + Math.random() * 1.2 });
     }
 
-    D.heroGlow(ctx, h, U.clamp(h.flameSize / 30, 0, 1.4) * G.lightFade);
-    D.flame(ctx, h.fx, h.fy, h.flameSize, h.flameLean, t, 0);
+    const heroK = h.out ? 0 : G.lightFade * (0.55 + h.flame / 220) * (1 + h.boostA * 0.6);
+    D.heroGlow(ctx, h, heroK, t);
 
     // particles
     for (const p of particles) {
@@ -1166,6 +1251,19 @@
     drawTexts();
   }
 
+  function glow(x, y, r, a) {
+    if (a <= 0.01) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(255,190,100,${a})`);
+    g.addColorStop(0.35, `rgba(255,120,30,${a * 0.4})`);
+    g.addColorStop(1, 'rgba(255,90,20,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    ctx.restore();
+  }
+
   function lightAt(x, y) {
     if (G.darkAlpha < 0.3) return 1;
     const h = hero;
@@ -1182,7 +1280,10 @@
     ctx.font = '600 22px Cairo, Tahoma, sans-serif';
     ctx.textAlign = 'center';
     ctx.direction = 'rtl';
-    for (const tx of L.texts) {
+    // only the closest hint is shown, so they never overlap
+    let near = null;
+    for (const tx of L.texts) if (!near || Math.abs(tx.x - hx) < Math.abs(near.x - hx)) near = tx;
+    for (const tx of near ? [near] : []) {
       const d = tx.x - hx;
       const a = U.clamp(1 - Math.max(0, Math.abs(d + 120) - 180) / 220, 0, 1) * (1 - G.life);
       if (a <= 0.01) continue;
@@ -1323,6 +1424,45 @@
   }
 
   // ------------------------------------------------------------ loop
+  const startBtn = document.getElementById('startBtn');
+  if (!CM.assetsReady) {
+    startBtn.disabled = true;
+    startBtn.dataset.label = startBtn.textContent;
+    startBtn.textContent = '…';
+  }
+  CM.onAssets(() => {
+    startBtn.disabled = false;
+    if (startBtn.dataset.label) startBtn.textContent = startBtn.dataset.label;
+    // the living forest panorama fades softly into the sky at its top edge
+    const im = CM.img.forest_alive;
+    if (im.width) {
+      const c = document.createElement('canvas');
+      c.width = im.width;
+      c.height = im.height;
+      const x = c.getContext('2d');
+      x.drawImage(im, 0, 0);
+      x.globalCompositeOperation = 'destination-in';
+      const g = x.createLinearGradient(0, 0, 0, im.height);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(0.3, 'rgba(0,0,0,1)');
+      g.addColorStop(1, 'rgba(0,0,0,1)');
+      x.fillStyle = g;
+      x.fillRect(0, 0, im.width, im.height);
+      CM.forestFaded = c;
+    }
+  });
+
+  function drawLoading() {
+    setScreen(ctx);
+    ctx.fillStyle = '#0D0805';
+    ctx.fillRect(0, 0, W, H);
+    const p = CM.assetProgress();
+    ctx.fillStyle = 'rgba(255,170,70,0.25)';
+    ctx.fillRect(W / 2 - 150, H - 80, 300, 4);
+    ctx.fillStyle = '#ffb347';
+    ctx.fillRect(W / 2 - 150, H - 80, 300 * p, 4);
+  }
+
   let last = performance.now();
   function frame(now) {
     let dt = (now - last) / 1000;
@@ -1334,7 +1474,8 @@
     for (let i = 0; i < steps; i++) update(dt / steps);
     pressed = {};
     syncTouchUI();
-    render();
+    if (CM.assetsReady) render();
+    else drawLoading();
     requestAnimationFrame(frame);
   }
 

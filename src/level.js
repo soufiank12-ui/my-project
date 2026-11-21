@@ -2,57 +2,30 @@
 (function () {
   const CM = window.CM;
   const U = CM.util;
-  const GY = (CM.GY = 600);
+  const GY = CM.GY;
 
-  function makeTree(rand, x, height, thick, dim) {
-    const segs = [];
-    const tips = [];
-    const leafCols = ['#3f7d3a', '#4f9142', '#5ca64a', '#367036', '#6aa84f'];
-    const flowerCols = ['#f2a7c3', '#ffe08a', '#ffffff'];
-    function branch(x0, y0, ang, len, w, depth) {
-      const x1 = x0 + Math.cos(ang) * len;
-      const y1 = y0 + Math.sin(ang) * len;
-      const bend = (rand() - 0.5) * len * 0.35;
-      const cx = (x0 + x1) / 2 + Math.cos(ang + Math.PI / 2) * bend;
-      const cy = (y0 + y1) / 2 + Math.sin(ang + Math.PI / 2) * bend;
-      segs.push({ x1: x0, y1: y0, x2: x1, y2: y1, cx, cy, w });
-      const maxDepth = dim ? 4 : 5;
-      if (depth >= maxDepth || len < 9) {
-        const blobs = [];
-        const n = 2 + ((rand() * 3) | 0);
-        for (let i = 0; i < n; i++) blobs.push([(rand() - 0.5) * 18, (rand() - 0.6) * 14, 7 + rand() * 9]);
-        tips.push({
-          x: x1,
-          y: y1,
-          k: rand(),
-          col: leafCols[(rand() * leafCols.length) | 0],
-          blobs,
-          flower: rand() < 0.18 ? flowerCols[(rand() * flowerCols.length) | 0] : null,
-        });
-        return;
-      }
-      // some dead branches simply snap off
-      if (depth > 1 && rand() < 0.12) return;
-      const n = depth === 0 ? 3 : rand() < 0.55 ? 2 : 3;
-      for (let i = 0; i < n; i++) {
-        let a = ang + (i - (n - 1) / 2) * 0.55 + (rand() - 0.5) * 0.7;
-        a = U.clamp(a, -Math.PI + 0.25, -0.25);
-        branch(x1, y1, a, len * (0.6 + rand() * 0.2), Math.max(1.2, w * 0.6), depth + 1);
-      }
-    }
-    // trunk in two pieces for a gnarled look
-    const lean = (rand() - 0.5) * 0.18;
-    const t1 = height * 0.3;
-    const xa = x + Math.cos(-Math.PI / 2 + lean) * t1;
-    const ya = GY + 4 + Math.sin(-Math.PI / 2 + lean) * t1;
-    segs.push({ x1: x, y1: GY + 6, x2: xa, y2: ya, cx: x + (rand() - 0.5) * 8, cy: GY - t1 / 2, w: thick * 1.15 });
-    branch(xa, ya, -Math.PI / 2 - lean + (rand() - 0.5) * 0.2, height * 0.3, thick, 0);
-    // roots
-    for (const s of [-1, 1]) {
-      segs.push({ x1: x, y1: GY - 10, x2: x + s * thick * 1.8, y2: GY + 4, cx: x + s * thick * 0.6, cy: GY - 2, w: thick * 0.45 });
-    }
-    return { x, segs, tips };
+  // Rock collider -> dome-shaped polygon (used for the light's shadow casting).
+  function rockShape(x, w, h) {
+    const r = { x, y: GY - h, w, h, kind: 'rock' };
+    r.pts = [
+      [x - 2, GY + 3],
+      [x + w * 0.02, GY - h * 0.5],
+      [x + w * 0.15, GY - h * 0.85],
+      [x + w * 0.4, GY - h],
+      [x + w * 0.68, GY - h * 0.97],
+      [x + w * 0.9, GY - h * 0.7],
+      [x + w + 2, GY - h * 0.3],
+      [x + w + 3, GY + 3],
+    ];
+    return r;
   }
+
+  // Painted dead trees. ax/base = trunk centre and ground line inside the image,
+  // ledge = the fork you can stand on after climbing the trunk (image coordinates).
+  const TREE_ART = {
+    tree_a: { ax: 125, base: 178, ledgeY: 58, l0: 92, l1: 170 },
+    tree_b: { ax: 132, base: 175, ledgeY: 62, l0: 105, l1: 170 },
+  };
 
   CM.buildLevel1 = function () {
     const rand = U.rng(20261120);
@@ -74,58 +47,38 @@
       g.top = [];
       for (let x = a; x < b; x += 18) g.top.push([x, GY + (x === a ? 3 : (rand() - 0.5) * 4)]);
       g.top.push([b, GY + 3]);
-      g.pebbles = [];
-      const n = ((b - a) / 11) | 0;
-      for (let i = 0; i < n; i++) {
-        const top = rand() < 0.55;
-        g.pebbles.push({
-          x: a + 6 + rand() * (b - a - 12),
-          y: top ? GY - 0.5 + rand() * 3 : GY + 8 + rand() * 90,
-          rx: top ? 1.5 + rand() * 4.5 : 2 + rand() * 7,
-          ry: top ? 1.2 + rand() * 2.4 : 1.5 + rand() * 4,
-          s: rand(),
-        });
-      }
       L.solids.push(g);
       return g;
     });
     L.solids.push({ x: -300, y: -2000, w: 300, h: 3000, kind: 'wall' });
     L.solids.push({ x: 7700, y: -2000, w: 400, h: 3000, kind: 'wall' });
 
-    // Tree stumps you climb in the first section
-    L.stumps = [
-      [1330, 70, 85],
-      [1500, 84, 160],
-    ].map(([x, w, h]) => ({ x, y: GY - h, w, h, kind: 'stump' }));
-    L.stumps.forEach((s) => L.solids.push(s));
-
     // Rocks: obstacles, and shelter from the wind (wind blows from the right).
     L.rocks = [
-      [2280, 70, 78],
-      [2600, 74, 80],
-      [2900, 70, 76],
-      [4850, 70, 76],
-      [5190, 70, 76],
-      [6250, 72, 78],
+      [1460, 200, 165], // the big boulder: too high to jump, you must climb it
+      [2280, 90, 74],
+      [2600, 94, 78],
+      [2900, 90, 72],
+      [4846, 74, 66],
+      [5186, 74, 66],
+      [6250, 92, 74],
     ].map(([x, w, h]) => {
-      const r = { x, y: GY - h, w, h, kind: 'rock' };
-      r.pts = [
-        [x - 4, GY + 3],
-        [x - 2, GY - h * 0.45],
-        [x + w * 0.12, GY - h * 0.85],
-        [x + w * 0.35, GY - h - 1],
-        [x + w * 0.7, GY - h + 2],
-        [x + w * 0.92, GY - h * 0.75],
-        [x + w + 2, GY - h * 0.35],
-        [x + w + 5, GY + 3],
-      ];
-      r.cracks = [
-        [x + w * 0.3, GY - h * 0.8, x + w * 0.42, GY - h * 0.45],
-        [x + w * 0.42, GY - h * 0.45, x + w * 0.36, GY - h * 0.2],
-        [x + w * 0.7, GY - h * 0.6, x + w * 0.82, GY - h * 0.35],
-      ];
+      const r = rockShape(x, w, h);
       L.solids.push(r);
       return r;
+    });
+
+    // Climbable dead trees, each with a fork to stand on.
+    L.trees = [
+      ['tree_b', 690, 1.6],
+      ['tree_a', 3300, 1.6],
+      ['tree_b', 6690, 1.6],
+    ].map(([img, x, sc]) => {
+      const a = TREE_ART[img];
+      const tr = { img, x, s: sc, ax: a.ax, base: a.base };
+      tr.ledge = { x: x + (a.l0 - a.ax) * sc, y: GY + 8 - (a.base - a.ledgeY) * sc, w: (a.l1 - a.l0) * sc, h: 10, kind: 'ledge' };
+      L.solids.push(tr.ledge);
+      return tr;
     });
 
     // Wind zones (gusts against the direction of travel)
@@ -160,45 +113,28 @@
     L.brazier = { x: 7250, lit: false, flameA: 0 };
 
     L.embers = [
-      [1542, 398],
+      [1570, 400],
+      [700, 380],
       [2440, 552],
-      [3330, 552],
+      [3310, 372],
       [4085, 552],
       [4790, 476],
       [5130, 476],
       [6330, 552],
-      [6900, 552],
+      [6700, 385],
     ].map(([x, y]) => ({ x, y, taken: false, t: 0 }));
 
     L.texts = [
       { x: 230, t: 'تحرّك بالأسهم أو بالمفتاحين A و D', tt: 'تحرّك بزرَّي ◀ ▶' },
       { x: 820, t: 'اقفز بالمسافة', tt: 'اقفز بالزر ⤒' },
-      { x: 1420, t: 'الشرارات الطائرة تقوّي شعلتك' },
+      { x: 560, t: 'الشرارات الطائرة تقوّي شعلتك' },
+      { x: 1380, t: 'صخرة عالية! اقترب منها واضغط المسافة لتتسلّقها', tt: 'صخرة عالية! اقترب منها والمس ⤒ لتتسلّقها' },
       { x: 1960, t: 'الريح تُضعف شعلتك… اختبئ خلف الصخور حتى تهدأ' },
       { x: 3080, t: 'الشمعة الصغيرة: نقطة حفظ وتعيد شحن شعلتك' },
       { x: 3430, t: 'احذر قطرات الماء — راقبها وهي تتكوّن قبل أن تسقط' },
       { x: 4470, t: 'اضغط E أو Shift لتقوية الضوء ورؤية الطريق', tt: 'المس زر ☀ لتقوية الضوء ورؤية الطريق' },
       { x: 6700, t: 'احمل شعلتك إلى المشعل الكبير…' },
     ];
-
-    // Decorative trees (world layer) and a dim parallax forest behind.
-    const gaps = groundSpans.slice(1).map((s, i) => [groundSpans[i][1], s[0]]);
-    const inGap = (x, pad) => gaps.some(([a, b]) => x > a - pad && x < b + pad);
-    const blocked = (x) =>
-      inGap(x, 50) ||
-      L.rocks.some((r) => x > r.x - 30 && x < r.x + r.w + 30) ||
-      L.checkpoints.some((c) => Math.abs(x - c.x) < 60) ||
-      Math.abs(x - L.brazier.x) < 140;
-    L.trees = [];
-    for (let x = 60; x < 7650; x += 230 + rand() * 260) {
-      if (blocked(x)) continue;
-      L.trees.push(makeTree(rand, x, 230 + rand() * 170, 9 + rand() * 7, false));
-    }
-    // the two trunks holding the fallen logs are drawn by D.log, add none there
-    L.bgTrees = [];
-    for (let x = -200; x < 7700 * 0.6 + 1600; x += 110 + rand() * 170) {
-      L.bgTrees.push(makeTree(rand, x, 180 + rand() * 170, 5 + rand() * 5, true));
-    }
 
     // Grass and flowers sleep in the dry earth until the light returns.
     L.grass = [];
@@ -207,7 +143,7 @@
     const petals = ['#e86a6a', '#f2c94c', '#8fb4ff', '#c58cf0', '#ff9fc4', '#ffffff'];
     for (const g of L.grounds) {
       for (let x = g.x + 4; x < g.x + g.w - 4; x += 4 + rand() * 6) {
-        L.grass.push({ x, h: 8 + rand() * 16, lean: (rand() - 0.5) * 0.6, col: greens[(rand() * greens.length) | 0], dead: 2 + rand() * 4 });
+        L.grass.push({ x, h: 8 + rand() * 16, lean: (rand() - 0.5) * 0.6, col: greens[(rand() * greens.length) | 0] });
       }
       for (let x = g.x + 20; x < g.x + g.w - 20; x += 35 + rand() * 90) {
         L.flowers.push({ x, h: 12 + rand() * 18, r: 3 + rand() * 2.5, col: petals[(rand() * petals.length) | 0], k: rand() });
