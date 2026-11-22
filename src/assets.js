@@ -14,10 +14,10 @@
     px: 3,
     flameY: {
       idle: 113, walk0: 108, walk1: 103, walk2: 108, walk3: 105, walk4: 108, walk5: 107,
-      jump_up: 109, jump_down: 108, boost: 118, out: 91, climb0: 112, climb1: 109, climb2: 112,
+      jump_up: 109, jump_down: 108, boost: 118, out: 91, climb0: 117, climb1: 119,
     },
     walk: ['walk0', 'walk1', 'walk2', 'walk3', 'walk4', 'walk5'],
-    climb: ['climb0', 'climb1', 'climb2'],
+    climb: ['climb0', 'climb1'], // seen from behind, alternated while climbing
   };
 
   const heroFrames = Object.keys(CM.HERO.flameY);

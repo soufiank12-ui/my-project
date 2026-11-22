@@ -21,7 +21,8 @@
   const BOOST_COOLDOWN = 5;
   const EMBER_GAIN = 20;
   const BASE_ZOOM = 1.3; // the camera sits close, like a miniature lit by a candle
-  const CLIMB_SPEED = 115;
+  const CLIMB_STEP_TIME = 0.2; // the two climbing images swap every 0.2 s…
+  const CLIMB_STEP = 23; // …and each swap lifts him this much (≈115 px/s)
   const DARKNESS = 0.955;
 
   const canvas = document.getElementById('game');
@@ -118,6 +119,9 @@
     right: () => keys.ArrowRight || keys.KeyD,
     jump: () => keys.Space || keys.ArrowUp || keys.KeyW,
     jumpP: () => pressed.Space || pressed.ArrowUp || pressed.KeyW,
+    down: () => keys.ArrowDown || keys.KeyS,
+    leftP: () => pressed.ArrowLeft || pressed.KeyA,
+    rightP: () => pressed.ArrowRight || pressed.KeyD,
     boostP: () => pressed.KeyE || pressed.ShiftLeft || pressed.ShiftRight,
   };
 
@@ -177,7 +181,7 @@
       fy: y,
       lightR: 200,
       climb: null,
-      climbPh: 0,
+      climbFrame: 0,
       pose: null,
       poseT: 0,
       out: false,
@@ -321,29 +325,46 @@
     return null;
   }
 
-  function updateClimb(h, dt) {
+  // One climbing step: swap to the other image and reach a little higher.
+  function climbStep(h) {
+    const c = h.climb;
+    c.stepT = 0;
+    c.rise += CLIMB_STEP;
+    h.climbFrame = 1 - h.climbFrame;
+    A.crackle(0.05);
+    burst(h.x + h.w / 2 + c.side * 10, h.y + 24, 2, 'dust', { speed: 30, life: 0.5, size: 1.6, g: 300 });
+  }
+
+  // Hold jump to keep climbing; release to hang still on the wall (last image stays);
+  // press a direction away from the wall (or down) to let go.
+  function updateClimb(h, dt, dir, controllable) {
     const c = h.climb;
     c.t += dt;
     h.vx = 0;
     h.vy = 0;
     h.onGround = false;
-    // jump again = push off the wall
-    if (h.jumpBuf > 0 && c.t > 0.2) {
-      h.jumpBuf = 0;
-      h.climb = null;
-      h.vy = -JUMP_V * 0.75;
-      if (c.kind === 'rock') {
-        h.facing = -c.side;
-        h.vx = -c.side * 230;
+    if (controllable && c.t > 0.12) {
+      const awayP = c.kind === 'rock' ? (c.side === 1 ? inp.leftP() : inp.rightP()) : inp.leftP() || inp.rightP();
+      if (awayP || inp.down()) {
+        h.climb = null;
+        h.vy = -200;
+        h.vx = (dir || -c.side) * 170;
+        if (dir) h.facing = dir;
+        return;
       }
-      A.jump();
-      return;
+    }
+    if (controllable && h.jumpBuf > 0) {
+      h.jumpBuf = 0;
+      climbStep(h); // every new press is a step
+    } else if (controllable && inp.jump()) {
+      c.stepT += dt;
+      if (c.stepT >= CLIMB_STEP_TIME) climbStep(h); // holding keeps climbing
+    } else {
+      c.stepT = CLIMB_STEP_TIME * 0.6; // released: hang; the next press steps at once
     }
     h.x = U.approach(h.x, c.x, dt * 220);
-    h.y -= CLIMB_SPEED * dt;
-    h.climbPh += dt * 7;
-    if (Math.random() < dt * 6) burst(h.x + h.w / 2 + c.side * 12, h.y + 20, 1, 'dust', { speed: 30, life: 0.5, size: 1.6, g: 300 });
-    if (h.y + h.h <= c.top) {
+    h.y = U.approach(h.y, c.startY - c.rise, dt * 260);
+    if (h.y + h.h <= c.top + 1) {
       // reached the top: pull up and stand on it
       h.y = c.top - h.h;
       if (c.kind === 'rock') h.x = c.side === 1 ? c.obj.x + 3 : c.obj.x + c.obj.w - h.w - 3;
@@ -378,13 +399,17 @@
       if (c) {
         h.climb = c;
         h.jumpBuf = 0;
+        c.startY = h.y;
+        c.rise = 0;
+        h.climbFrame = 1;
+        climbStep(h);
         if (c.kind === 'rock') h.facing = c.side;
         h.squash = -0.3;
         A.jump();
       }
     }
     if (h.climb) {
-      updateClimb(h, dt);
+      updateClimb(h, dt, dir, controllable);
       h.walkAmt = 0;
       h.squash = U.approach(h.squash, 0, dt * 5);
       return finishHeroUpdate(h, dt, controllable, push, safe, w);

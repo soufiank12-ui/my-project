@@ -64,7 +64,7 @@
 
   function heroFrame(h) {
     if (h.out) return 'out';
-    if (h.climb) return HM.climb[Math.floor(h.climbPh) % HM.climb.length];
+    if (h.climb) return HM.climb[h.climbFrame % HM.climb.length];
     if (h.pose === 'boost') return 'boost';
     if (!h.onGround) return h.vy < 0 ? 'jump_up' : 'jump_down';
     if (h.walkAmt > 0.35) return HM.walk[Math.floor(h.walkPh / 1.25) % HM.walk.length];
@@ -76,7 +76,8 @@
     const name = heroFrame(h);
     const im = CM.img['hero_' + name];
     const k = 1 / HM.px;
-    const cx = h.x + h.w / 2;
+    // on a rock face he presses against the stone, not beside it
+    const cx = h.x + h.w / 2 + (h.climb && h.climb.kind === 'rock' ? h.climb.side * 9 : 0);
     const feetY = h.y - 2 + (HM.feet - HM.cy) * k;
     const sq = h.squash;
     const syk = 1 - sq * 0.12;
