@@ -1518,6 +1518,7 @@
     },
     start: startGame,
     teleport(x) {
+      hero.climb = null;
       hero.x = x;
       hero.y = GY - hero.h - 2;
       hero.vx = hero.vy = 0;
