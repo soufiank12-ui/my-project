@@ -15,6 +15,14 @@
     flameY: {
       idle: 113, walk0: 108, walk1: 103, walk2: 108, walk3: 105, walk4: 108, walk5: 107,
       jump_up: 109, jump_down: 108, boost: 118, out: 91, climb0: 117, climb1: 119,
+      // new jump animation (assets/candleman): feet on the same line in every frame
+      jump_up_1: 111, jump_up_2: 142, jump_up_3: 101, jump_up_4: 99, jump_up_5: 144, jump_up_6: 131,
+      jump_land_1: 114, jump_land_2: 122, jump_land_3: 162, jump_land_4: 185, jump_land_5: 146, jump_land_6: 118,
+    },
+    // horizontal offset of the flame from the frame's centre line (sprite px); 0 when missing
+    flameX: {
+      jump_up_1: 5, jump_up_2: 35, jump_up_3: 43, jump_up_4: 40, jump_up_5: 37, jump_up_6: 6,
+      jump_land_1: 9, jump_land_2: 5, jump_land_3: 16, jump_land_4: 14, jump_land_5: 13, jump_land_6: -2,
     },
     walk: ['walk0', 'walk1', 'walk2', 'walk3', 'walk4', 'walk5'],
     climb: ['climb0', 'climb1'], // seen from behind, alternated while climbing
@@ -44,7 +52,7 @@
     im.src = src;
     CM.img[key] = im;
   }
-  heroFrames.forEach((k) => load('hero_' + k, 'assets/hero/' + k + '.png'));
+  heroFrames.forEach((k) => load('hero_' + k, (/^jump_(up|land)_\d$/.test(k) ? 'assets/candleman/' : 'assets/hero/') + k + '.png'));
   world.forEach((k) => load(k, 'assets/world/' + k + '.png'));
 
   // Draw an image tiled horizontally, alternating mirrored copies so the seams always match.

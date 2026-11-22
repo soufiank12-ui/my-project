@@ -66,7 +66,15 @@
     if (h.out) return 'out';
     if (h.climb) return HM.climb[h.climbFrame % HM.climb.length];
     if (h.pose === 'boost') return 'boost';
-    if (!h.onGround) return h.vy < 0 ? 'jump_up' : 'jump_down';
+    const ja = h.jumpAnim;
+    if (!h.onGround) {
+      // rising: take-off frames 1→6, then hold frame 6 at the top of the jump
+      if (ja && ja.phase === 'up' && h.vy < 100) return 'jump_up_' + Math.min(6, 1 + Math.floor(ja.t / 0.05));
+      if (h.vy < 0) return 'jump_up_6';
+      return 'jump_land_1'; // falling
+    }
+    // touched the ground: the rest of the landing frames
+    if (ja && ja.phase === 'land' && ja.t < 0.3) return 'jump_land_' + Math.min(6, 2 + Math.floor(ja.t / 0.06));
     if (h.walkAmt > 0.35) return HM.walk[Math.floor(h.walkPh / 1.25) % HM.walk.length];
     return 'idle';
   }
@@ -93,7 +101,7 @@
     if (im && im.width) ctx.drawImage(im, -HM.cx * k, -HM.feet * k, HM.cw * k, HM.ch * k);
     ctx.restore();
     h.frame = name;
-    h.fx = cx - h.facing * (name.startsWith('walk') ? 7 : 0);
+    h.fx = cx - h.facing * (name.startsWith('walk') ? 7 : 0) + h.facing * (HM.flameX[name] || 0) * k;
     h.fy = feetY - (HM.feet - HM.flameY[name]) * k * syk + bob;
   };
 

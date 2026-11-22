@@ -399,6 +399,7 @@
       if (c) {
         h.climb = c;
         h.jumpBuf = 0;
+        h.jumpAnim = null;
         c.startY = h.y;
         c.rise = 0;
         h.climbFrame = 1;
@@ -427,6 +428,7 @@
       h.vy = -JUMP_V;
       h.coyote = 0;
       h.jumpBuf = 0;
+      h.jumpAnim = { phase: 'up', t: 0 };
       h.squash = -0.7;
       A.jump();
       burst(cxh, h.y + h.h, 5, 'dust', { ang: -Math.PI / 2, spread: 2.4, speed: 60, life: 0.5, size: 2.5 });
@@ -439,6 +441,11 @@
     const wasGround = h.onGround;
     const preVy = h.vy;
     moveAndCollide(h, dt);
+    if (h.jumpAnim) {
+      h.jumpAnim.t += dt;
+      if (h.jumpAnim.phase === 'land' && h.jumpAnim.t > 0.3) h.jumpAnim = null;
+    }
+    if (h.onGround && !wasGround && (preVy > 150 || (h.jumpAnim && h.jumpAnim.phase === 'up'))) h.jumpAnim = { phase: 'land', t: 0 };
     if (h.onGround && !wasGround && preVy > 300) {
       h.squash = Math.min(1, preVy / 1000);
       A.land(preVy / 1100);
