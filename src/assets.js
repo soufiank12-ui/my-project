@@ -52,7 +52,12 @@
     im.src = src;
     CM.img[key] = im;
   }
-  heroFrames.forEach((k) => load('hero_' + k, (/^jump_(up|land)_\d$/.test(k) ? 'assets/candleman/' : 'assets/hero/') + k + '.png'));
+  // Everything is preloaded here, once, before the game can start: nothing loads during play.
+  CM.heroImg = {}; // frame name -> image (no string building in the game loop)
+  heroFrames.forEach((k) => {
+    load('hero_' + k, (/^jump_(up|land)_\d$/.test(k) ? 'assets/candleman/' : 'assets/hero/') + k + '.png');
+    CM.heroImg[k] = CM.img['hero_' + k];
+  });
   world.forEach((k) => load(k, 'assets/world/' + k + '.png'));
 
   // Draw an image tiled horizontally, alternating mirrored copies so the seams always match.

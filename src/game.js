@@ -27,26 +27,38 @@
 
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
+  // The darkness + light layer lives on its own canvas, created once and reused every frame.
+  // It is soft by nature, so it renders at half resolution (much cheaper on the iPad).
   const lc = document.createElement('canvas');
   const lctx = lc.getContext('2d');
+  const LIGHT_RES = 0.5;
   const wrap = document.getElementById('wrap');
   const menuEl = document.getElementById('menu');
   const endEl = document.getElementById('endScreen');
-  let S = 1; // backing-store scale
+  let S = 1; // backing-store scale: CSS scale x devicePixelRatio, capped at 2
+  let LS = 0.5; // light-layer scale
 
   function resize() {
     const k = Math.min(window.innerWidth / W, window.innerHeight / H);
     wrap.style.transform = `translate(${-(W * k) / 2}px, ${-(H * k) / 2}px) scale(${k})`;
-    S = U.clamp(Math.round(k * (window.devicePixelRatio || 1) * 4) / 4, 1, 2);
-    canvas.width = lc.width = Math.round(W * S);
-    canvas.height = lc.height = Math.round(H * S);
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    S = U.clamp(Math.round(k * dpr * 4) / 4, 1, 2);
+    LS = S * LIGHT_RES;
+    canvas.width = Math.round(W * S);
+    canvas.height = Math.round(H * S);
+    lc.width = Math.round(W * LS);
+    lc.height = Math.round(H * LS);
+    CM.fx.resize(S);
   }
   window.addEventListener('resize', resize);
   resize();
 
   // ------------------------------------------------------------ input
   const keys = {};
-  let pressed = {};
+  const pressed = {};
+  function clearPressed() {
+    for (const k in pressed) pressed[k] = false;
+  }
   const GAME_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'];
   window.addEventListener('keydown', (e) => {
     if (GAME_KEYS.includes(e.code)) e.preventDefault();
@@ -141,16 +153,35 @@
     hurtShake: 0,
     lightFade: 1,
     dieT: 0,
-    toast: null,
+    toast: { on: false, text: '', t: 0, dur: 0 },
     stageT: 0,
     crackleT: 0,
   };
   let L;
   let hero;
-  let particles = [];
-  let drops = [];
-  let motes = [];
-  let birds = [];
+  // Object pools: everything is allocated once here and recycled, never created while playing.
+  const MAX_PARTICLES = 900;
+  const particles = []; // live particles
+  const freeParticles = [];
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    freeParticles.push({ type: '', x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, s: 1, g: 0, rot: 0, col: '', minX: -1e9 });
+  }
+  const MAX_DROPS = 32;
+  const drops = [];
+  const freeDrops = [];
+  for (let i = 0; i < MAX_DROPS; i++) freeDrops.push({ x: 0, y: 0, vy: 0 });
+  const motes = [];
+  for (let i = 0; i < 90; i++) motes.push({ x: 0, y: 0, vx: 0, vy: 0, s: 1, p: 0 });
+  const birds = [];
+  for (let i = 0; i < 6; i++) birds.push({ on: false, x: 0, y: 0, v: 0, p: 0, s: 1 });
+  const PETALS = ['#ffb7cf', '#fff1a8', '#ffffff'];
+  // spark / leaf colours by brightness level, prepared once (no per-frame strings)
+  const SPARK_COL = [];
+  const LEAF_COL = [];
+  for (let i = 0; i <= 16; i++) {
+    SPARK_COL.push(`rgb(255,${(150 + 80 * (i / 16)) | 0},60)`);
+    LEAF_COL.push(`rgb(${(110 * (i / 16)) | 0},${(75 * (i / 16)) | 0},${(40 * (i / 16)) | 0})`);
+  }
 
   function makeHero(x, y) {
     return {
@@ -182,6 +213,8 @@
       lightR: 200,
       climb: null,
       climbFrame: 0,
+      jaPhase: '', // jump animation: '' | 'up' | 'land'
+      jaT: 0,
       pose: null,
       poseT: 0,
       out: false,
@@ -202,17 +235,23 @@
     G.endT = 0;
     G.flash = 0;
     G.lightFade = 1;
-    G.toast = null;
+    G.toast.on = false;
     G.stageT = 0;
     G.bloomPlayed = false;
     G.endShown = false;
     G.cam.z = BASE_ZOOM;
     G.cam.look = 0;
-    particles = [];
-    drops = [];
-    birds = [];
-    motes = [];
-    for (let i = 0; i < 90; i++) motes.push({ x: Math.random() * W, y: 200 + Math.random() * 420, vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 6, s: 0.6 + Math.random() * 1.6, p: Math.random() * TAU });
+    while (particles.length) freeParticles.push(particles.pop());
+    while (drops.length) freeDrops.push(drops.pop());
+    for (const b of birds) b.on = false;
+    for (const m of motes) {
+      m.x = Math.random() * W;
+      m.y = 200 + Math.random() * 420;
+      m.vx = (Math.random() - 0.5) * 8;
+      m.vy = (Math.random() - 0.5) * 6;
+      m.s = 0.6 + Math.random() * 1.6;
+      m.p = Math.random() * TAU;
+    }
     snapCamera();
   }
 
@@ -237,7 +276,10 @@
   });
 
   function showToast(text, dur) {
-    G.toast = { text, t: 0, dur: dur || 2.5 };
+    G.toast.text = text;
+    G.toast.t = 0;
+    G.toast.dur = dur || 2.5;
+    G.toast.on = true;
   }
 
   // ------------------------------------------------------------ helpers
@@ -248,6 +290,7 @@
     return U.clamp((G.wave - Math.abs(x - L.brazier.x)) / 600, 0, 1);
   }
 
+  const WIND = { I: 0, warn: 0 };
   function windAt(x) {
     let best = 0;
     let warn = 0;
@@ -257,7 +300,9 @@
       best = Math.max(best, z.I * edge);
       warn = Math.max(warn, z.warn * edge);
     }
-    return { I: best, warn };
+    WIND.I = best;
+    WIND.warn = warn;
+    return WIND;
   }
 
   function sheltered(h) {
@@ -268,18 +313,39 @@
     return false;
   }
 
-  function spawn(p) {
+  // Takes a particle from the pool (returns null if the pool is empty).
+  function spawn(type, x, y, vx, vy, life, max, s, g) {
+    const p = freeParticles.pop();
+    if (!p) return null;
+    p.type = type;
+    p.x = x;
+    p.y = y;
+    p.vx = vx;
+    p.vy = vy;
+    p.life = life;
+    p.max = max;
+    p.s = s;
+    p.g = g || 0;
+    p.rot = 0;
+    p.col = '';
+    p.minX = -1e9;
     particles.push(p);
     return p;
   }
+  function killParticle(i) {
+    const p = particles[i];
+    particles[i] = particles[particles.length - 1];
+    particles.pop();
+    freeParticles.push(p);
+  }
 
-  function burst(x, y, n, type, opts) {
-    opts = opts || {};
+  // A burst of n particles. ang = NaN means all directions.
+  function burst(x, y, n, type, ang, spread, speed, life, size, g) {
     for (let i = 0; i < n; i++) {
-      const a = opts.ang !== undefined ? opts.ang + (Math.random() - 0.5) * (opts.spread || 1) : Math.random() * TAU;
-      const sp = (opts.speed || 120) * (0.3 + Math.random() * 0.9);
-      const life = (opts.life || 0.8) * (0.6 + Math.random() * 0.8);
-      spawn({ type, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, max: life, s: (opts.size || 2) * (0.6 + Math.random() * 0.8), g: opts.g || 0 });
+      const a = ang === ang ? ang + (Math.random() - 0.5) * spread : Math.random() * TAU;
+      const sp = speed * (0.3 + Math.random() * 0.9);
+      const l = life * (0.6 + Math.random() * 0.8);
+      spawn(type, x, y, Math.cos(a) * sp, Math.sin(a) * sp, l, l, size * (0.6 + Math.random() * 0.8), g);
     }
   }
 
@@ -311,16 +377,27 @@
 
   // ------------------------------------------------------------ climbing
   // Near a rock's side (facing it) or a tree trunk + jump = grab and climb to the top.
+  const CLIMB = { kind: '', obj: null, side: 1, top: 0, x: 0, t: 0, startY: 0, rise: 0, stepT: 0 };
+  function setClimb(kind, obj, side, top, x) {
+    CLIMB.kind = kind;
+    CLIMB.obj = obj;
+    CLIMB.side = side;
+    CLIMB.top = top;
+    CLIMB.x = x;
+    CLIMB.t = 0;
+    CLIMB.stepT = 0;
+    return CLIMB;
+  }
   function findClimb(h, dir) {
     const cx = h.x + h.w / 2;
     for (const r of L.rocks) {
       if (h.y + h.h <= r.y + 6 || h.y >= r.y + r.h) continue;
-      if ((h.facing === 1 || dir === 1) && Math.abs(h.x + h.w - r.x) <= 6) return { kind: 'rock', obj: r, side: 1, top: r.y, x: r.x - h.w, t: 0 };
-      if ((h.facing === -1 || dir === -1) && Math.abs(h.x - (r.x + r.w)) <= 6) return { kind: 'rock', obj: r, side: -1, top: r.y, x: r.x + r.w, t: 0 };
+      if ((h.facing === 1 || dir === 1) && Math.abs(h.x + h.w - r.x) <= 6) return setClimb('rock', r, 1, r.y, r.x - h.w);
+      if ((h.facing === -1 || dir === -1) && Math.abs(h.x - (r.x + r.w)) <= 6) return setClimb('rock', r, -1, r.y, r.x + r.w);
     }
     for (const tr of L.trees) {
       if (Math.abs(cx - tr.x) > 18 || h.y + h.h <= tr.ledge.y + 2) continue;
-      return { kind: 'tree', obj: tr, side: h.facing, top: tr.ledge.y, x: tr.x - h.w / 2, t: 0 };
+      return setClimb('tree', tr, h.facing, tr.ledge.y, tr.x - h.w / 2);
     }
     return null;
   }
@@ -332,7 +409,7 @@
     c.rise += CLIMB_STEP;
     h.climbFrame = 1 - h.climbFrame;
     A.crackle(0.05);
-    burst(h.x + h.w / 2 + c.side * 10, h.y + 24, 2, 'dust', { speed: 30, life: 0.5, size: 1.6, g: 300 });
+    burst(h.x + h.w / 2 + c.side * 10, h.y + 24, 2, 'dust', NaN, 1, 30, 0.5, 1.6, 300);
   }
 
   // Hold jump to keep climbing; release to hang still on the wall (last image stays);
@@ -399,7 +476,7 @@
       if (c) {
         h.climb = c;
         h.jumpBuf = 0;
-        h.jumpAnim = null;
+        h.jaPhase = '';
         c.startY = h.y;
         c.rise = 0;
         h.climbFrame = 1;
@@ -419,7 +496,11 @@
 
     const windV = -WIND_SPEED * push;
     const target = dir * MAX_SPEED + windV * (dir ? 1 : 0.6);
-    const acc = h.onGround ? (dir ? 2200 : 2600) : 1300;
+    // walking eases in and out instead of starting / stopping instantly
+    let acc;
+    if (!h.onGround) acc = 1300;
+    else if (dir && h.vx * dir < 0) acc = 2600; // turning around brakes quickly
+    else acc = dir ? 1250 : 1500;
     h.vx = U.approach(h.vx, target, acc * dt);
 
     // jumping with coyote time + input buffer
@@ -428,10 +509,11 @@
       h.vy = -JUMP_V;
       h.coyote = 0;
       h.jumpBuf = 0;
-      h.jumpAnim = { phase: 'up', t: 0 };
+      h.jaPhase = 'up';
+      h.jaT = 0;
       h.squash = -0.7;
       A.jump();
-      burst(cxh, h.y + h.h, 5, 'dust', { ang: -Math.PI / 2, spread: 2.4, speed: 60, life: 0.5, size: 2.5 });
+      burst(cxh, h.y + h.h, 5, 'dust', -Math.PI / 2, 2.4, 60, 0.5, 2.5, 0);
     }
     let g = GRAVITY;
     if (h.vy < 0 && !(controllable && inp.jump())) g *= 2.4;
@@ -441,15 +523,18 @@
     const wasGround = h.onGround;
     const preVy = h.vy;
     moveAndCollide(h, dt);
-    if (h.jumpAnim) {
-      h.jumpAnim.t += dt;
-      if (h.jumpAnim.phase === 'land' && h.jumpAnim.t > 0.3) h.jumpAnim = null;
+    if (h.jaPhase) {
+      h.jaT += dt; // animation speed is measured in seconds, not frames
+      if (h.jaPhase === 'land' && h.jaT > 0.3) h.jaPhase = '';
     }
-    if (h.onGround && !wasGround && (preVy > 150 || (h.jumpAnim && h.jumpAnim.phase === 'up'))) h.jumpAnim = { phase: 'land', t: 0 };
+    if (h.onGround && !wasGround && (preVy > 150 || h.jaPhase === 'up')) {
+      h.jaPhase = 'land';
+      h.jaT = 0;
+    }
     if (h.onGround && !wasGround && preVy > 300) {
       h.squash = Math.min(1, preVy / 1000);
       A.land(preVy / 1100);
-      burst(h.x + h.w / 2, h.y + h.h, 8, 'dust', { ang: -Math.PI / 2, spread: 3, speed: 90, life: 0.6, size: 2.5 });
+      burst(h.x + h.w / 2, h.y + h.h, 8, 'dust', -Math.PI / 2, 3, 90, 0.6, 2.5, 0);
     }
     h.squash = U.approach(h.squash, 0, dt * 5);
 
@@ -476,7 +561,7 @@
         h.flame -= BOOST_COST;
         if (h.onGround && !h.climb) h.poseT = 0.6;
         A.boost();
-        burst(h.fx, h.fy - 10, 26, 'spark', { speed: 260, life: 0.9, size: 1.8 });
+        burst(h.fx, h.fy - 10, 26, 'spark', NaN, 1, 260, 0.9, 1.8, 0);
       } else if (h.boostCd > 0) {
         G.boostDeny = 0.4;
       }
@@ -496,8 +581,8 @@
     G.flash = 0.35;
     G.hurtShake = 0.4;
     A.hiss();
-    burst(x, y, 14, 'steam', { ang: -Math.PI / 2, spread: 1.6, speed: 70, life: 1.1, size: 6 });
-    burst(x, y, 10, 'splash', { ang: -Math.PI / 2, spread: 2.6, speed: 160, life: 0.5, size: 1.6, g: 900 });
+    burst(x, y, 14, 'steam', -Math.PI / 2, 1.6, 70, 1.1, 6, 0);
+    burst(x, y, 10, 'splash', -Math.PI / 2, 2.6, 160, 0.5, 1.6, 900);
   }
 
   function die(reason) {
@@ -510,7 +595,7 @@
     hero.climb = null;
     hero.boostT = 0;
     A.death();
-    burst(hero.fx, hero.fy, 24, 'smoke', { ang: -Math.PI / 2, spread: 1.2, speed: 40, life: 2, size: 8 });
+    burst(hero.fx, hero.fy, 24, 'smoke', -Math.PI / 2, 1.2, 40, 2, 8, 0);
     showToast(reason === 'fall' ? 'سقطت في الظلام…' : 'انطفأت الشعلة…', 1.8);
   }
 
@@ -531,9 +616,9 @@
     h.windLean = 0;
     G.state = 'playing';
     G.lightFade = 0;
-    drops = [];
+    while (drops.length) freeDrops.push(drops.pop());
     A.respawn();
-    burst(h.x + h.w / 2, h.y - 6, 20, 'spark', { ang: -Math.PI / 2, spread: 2, speed: 140, life: 0.9, size: 1.6 });
+    burst(h.x + h.w / 2, h.y - 6, 20, 'spark', -Math.PI / 2, 2, 140, 0.9, 1.6, 0);
   }
 
   // ------------------------------------------------------------ world update
@@ -558,24 +643,34 @@
           const x0 = Math.max(z.x1, view0);
           const x1 = Math.min(z.x2 + 200, view1);
           const leaf = Math.random() < 0.12;
-          spawn({
-            type: leaf ? 'leaf' : 'streak',
-            x: x1 - Math.random() * (x1 - x0) * 0.3,
-            y: 330 + Math.random() * 265,
-            vx: -(leaf ? 300 : 750 + Math.random() * 500) * (0.35 + z.I),
-            vy: leaf ? -20 + Math.random() * 40 : 0,
-            life: leaf ? 2.5 : 0.8 + Math.random() * 0.5,
-            max: leaf ? 2.5 : 1.2,
-            s: leaf ? 3 + Math.random() * 2 : 30 + Math.random() * 60,
-            rot: Math.random() * TAU,
-            minX: z.x1 - 120,
-          });
+          const p = spawn(
+            leaf ? 'leaf' : 'streak',
+            x1 - Math.random() * (x1 - x0) * 0.3,
+            330 + Math.random() * 265,
+            -(leaf ? 300 : 750 + Math.random() * 500) * (0.35 + z.I),
+            leaf ? -20 + Math.random() * 40 : 0,
+            leaf ? 2.5 : 0.8 + Math.random() * 0.5,
+            leaf ? 2.5 : 1.2,
+            leaf ? 3 + Math.random() * 2 : 30 + Math.random() * 60,
+            0
+          );
+          if (p) {
+            p.rot = Math.random() * TAU;
+            p.minX = z.x1 - 120;
+          }
         }
         n -= 1;
       }
     }
     G.windAudio = audioWind;
     A.setWind(G.state === 'ending' || G.state === 'won' ? 0 : audioWind);
+  }
+
+  function removeDrop(i) {
+    const d = drops[i];
+    drops[i] = drops[drops.length - 1];
+    drops.pop();
+    freeDrops.push(d);
   }
 
   function updateDrips(dt) {
@@ -587,7 +682,13 @@
       em.form = c < FORM ? c / FORM : 0;
       if (c >= FORM && em.lastCyc !== cyc) {
         em.lastCyc = cyc;
-        drops.push({ x: em.x, y: em.y + 3, vy: 40 });
+        const d = freeDrops.pop();
+        if (d) {
+          d.x = em.x;
+          d.y = em.y + 3;
+          d.vy = 40;
+          drops.push(d);
+        }
       }
     }
     const h = hero;
@@ -598,14 +699,14 @@
       const hit = d.x > h.x - 4 && d.x < h.x + h.w + 4 && d.y > h.y - 34 && d.y < h.y + h.h;
       if (hit && G.state === 'playing') {
         hurt(DRIP_DAMAGE, d.x, d.y);
-        drops.splice(i, 1);
+        removeDrop(i);
         continue;
       }
       if (d.y >= GY - 1) {
-        burst(d.x, GY - 2, 7, 'splash', { ang: -Math.PI / 2, spread: 2.2, speed: 110, life: 0.45, size: 1.4, g: 900 });
+        burst(d.x, GY - 2, 7, 'splash', -Math.PI / 2, 2.2, 110, 0.45, 1.4, 900);
         const dist = Math.abs(d.x - (h.x + h.w / 2));
         if (dist < 700) A.drip(U.clamp(1 - dist / 700, 0.1, 1));
-        drops.splice(i, 1);
+        removeDrop(i);
       }
     }
   }
@@ -626,7 +727,7 @@
         e.t = 25;
         h.flame = Math.min(100, h.flame + EMBER_GAIN);
         A.pickup();
-        burst(e.x, e.y, 16, 'spark', { speed: 160, life: 0.7, size: 1.6 });
+        burst(e.x, e.y, 16, 'spark', NaN, 1, 160, 0.7, 1.6, 0);
       }
     }
     for (const cp of L.checkpoints) {
@@ -638,7 +739,7 @@
           cp.litT = 0;
           G.checkpoint = cp;
           A.ignite(false);
-          burst(cp.x, GY - 42, 22, 'spark', { ang: -Math.PI / 2, spread: 2, speed: 170, life: 0.9, size: 1.7 });
+          burst(cp.x, GY - 42, 22, 'spark', -Math.PI / 2, 2, 170, 0.9, 1.7, 0);
           showToast('أشعلت شمعة — نقطة حفظ', 2.4);
         }
         G.checkpoint = cp;
@@ -651,8 +752,8 @@
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.life -= dt;
-      if (p.life <= 0 || (p.minX !== undefined && p.x < p.minX)) {
-        particles.splice(i, 1);
+      if (p.life <= 0 || p.x < p.minX) {
+        killParticle(i);
         continue;
       }
       if (p.type === 'leaf') {
@@ -676,15 +777,15 @@
         p.vy *= 1 - dt * 0.8;
       } else if (p.type === 'petal') {
         p.vx += Math.sin(G.time * 2 + p.s * 10) * 20 * dt;
-        p.rot = (p.rot || 0) + dt * 3;
+        p.rot += dt * 3;
       }
-      p.vy += (p.g || 0) * dt;
+      p.vy += p.g * dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
     }
     // flame sparks
     if (hero.flameSize > 6 && Math.random() < dt * (3 + hero.boostA * 14)) {
-      spawn({ type: 'spark', x: hero.fx + (Math.random() - 0.5) * 6, y: hero.fy - 14, vx: (Math.random() - 0.5) * 30 - hero.windLean * 80, vy: -40 - Math.random() * 60, life: 1, max: 1, s: 0.9 + Math.random() });
+      spawn('spark', hero.fx + (Math.random() - 0.5) * 6, hero.fy - 14, (Math.random() - 0.5) * 30 - hero.windLean * 80, -40 - Math.random() * 60, 1, 1, 0.9 + Math.random(), 0);
     }
     // floating dust motes (screen-space, wrapped around the camera)
     const vw = W / G.cam.z;
@@ -713,7 +814,7 @@
       c.look = U.approach(c.look, h.facing * 90, dt * 150);
       tx = h.x + h.w / 2 - W / c.z / 2 + c.look;
     }
-    c.z = snap ? tz : U.lerp(c.z, tz, Math.min(1, dt * 3));
+    c.z = snap ? tz : U.lerp(c.z, tz, 1 - Math.exp(-dt * 3));
     const vw = W / c.z;
     const vh = H / c.z;
     // on the menu the candle man stands a little left of centre, below the title
@@ -724,8 +825,10 @@
       c.x = tx;
       c.y = ty;
     } else {
-      c.x = U.lerp(c.x, tx, Math.min(1, dt * 5));
-      c.y = U.lerp(c.y, ty, Math.min(1, dt * 5));
+      // smooth follow (exponential lerp: same feel at any frame rate)
+      const k = 1 - Math.exp(-dt * 5);
+      c.x = U.lerp(c.x, tx, k);
+      c.y = U.lerp(c.y, ty, k);
     }
   }
 
@@ -750,9 +853,10 @@
     if (e > 0.85 && !b.lit) {
       b.lit = true;
       A.ignite(true);
-      burst(b.x, GY - 90, 60, 'spark', { ang: -Math.PI / 2, spread: 2.2, speed: 320, life: 1.4, size: 2.2 });
+      burst(b.x, GY - 90, 60, 'spark', -Math.PI / 2, 2.2, 320, 1.4, 2.2, 0);
     }
     b.flameA = U.smooth(0.85, 2.2, e);
+    if (b.lit && Math.random() < dt * 30) spawn('spark', b.x + (Math.random() - 0.5) * 50, D.brazierFireY, (Math.random() - 0.5) * 40, -60 - Math.random() * 80, 1.2, 1.2, 1 + Math.random() * 1.2, 0);
     G.wave = e < 1.6 ? -1 : U.easeOut((e - 1.6) / 7) * 5200;
     G.darkAlpha = DARKNESS * (1 - U.smooth(1.8, 6.8, e));
     G.life = U.smooth(2.2, 8.5, e);
@@ -764,21 +868,32 @@
     if (G.life > 0.3) {
       const vw = W / G.cam.z;
       if (Math.random() < dt * 6 * G.life) {
-        spawn({ type: 'firefly', x: G.cam.x + Math.random() * vw, y: 380 + Math.random() * 210, vx: 0, vy: 0, life: 6, max: 6, s: 1.5 + Math.random() });
+        spawn('firefly', G.cam.x + Math.random() * vw, 380 + Math.random() * 210, 0, 0, 6, 6, 1.5 + Math.random(), 0);
       }
       if (Math.random() < dt * 4 * G.life) {
-        spawn({ type: 'petal', x: G.cam.x + Math.random() * vw, y: G.cam.y - 10, vx: -20 + Math.random() * 30, vy: 30 + Math.random() * 30, life: 12, max: 12, s: Math.random(), col: ['#ffb7cf', '#fff1a8', '#ffffff'][(Math.random() * 3) | 0] });
+        const pt = spawn('petal', G.cam.x + Math.random() * vw, G.cam.y - 10, -20 + Math.random() * 30, 30 + Math.random() * 30, 12, 12, Math.random(), 0);
+        if (pt) pt.col = PETALS[(Math.random() * 3) | 0];
       }
-      if (birds.length < 6 && Math.random() < dt * 0.5) {
-        birds.push({ x: G.cam.x - 40, y: 40 + Math.random() * 160, v: 60 + Math.random() * 50, p: Math.random() * TAU, s: 0.7 + Math.random() * 0.6 });
-        if (Math.random() < 0.6) A.bird();
+      if (Math.random() < dt * 0.5) {
+        for (const bd of birds) {
+          if (bd.on) continue;
+          bd.on = true;
+          bd.x = G.cam.x - 40;
+          bd.y = 40 + Math.random() * 160;
+          bd.v = 60 + Math.random() * 50;
+          bd.p = Math.random() * TAU;
+          bd.s = 0.7 + Math.random() * 0.6;
+          if (Math.random() < 0.6) A.bird();
+          break;
+        }
       }
     }
     for (const bd of birds) {
+      if (!bd.on) continue;
       bd.x += bd.v * dt;
       bd.p += dt * 9;
+      if (bd.x > G.cam.x + W / G.cam.z + 60) bd.on = false;
     }
-    birds = birds.filter((bd) => bd.x < G.cam.x + W / G.cam.z + 60);
     if (e > 10.5 && !G.endShown) {
       G.endShown = true;
       G.state = 'won';
@@ -788,11 +903,13 @@
     }
   }
 
-  // One-shot menu keys: handled once per frame, outside the physics sub-steps.
+  // One-shot menu keys: handled once per frame, outside the fixed physics steps.
   function handleMetaKeys() {
     if (pressed.KeyM) A.setMuted(!A.muted);
     if ((pressed.Escape || pressed.KeyP) && G.state === 'playing') G.paused = !G.paused;
     if (pressed.Enter && G.state === 'menu') startGame();
+    if (pressed.KeyF) fps.on = !fps.on;
+    pressed.KeyM = pressed.Escape = pressed.KeyP = pressed.Enter = pressed.KeyF = false;
   }
 
   function update(dt) {
@@ -806,9 +923,9 @@
     G.flash = Math.max(0, G.flash - dt);
     G.hurtShake = Math.max(0, G.hurtShake - dt);
     G.boostDeny = Math.max(0, (G.boostDeny || 0) - dt);
-    if (G.toast) {
+    if (G.toast.on) {
       G.toast.t += dt;
-      if (G.toast.t > G.toast.dur) G.toast = null;
+      if (G.toast.t > G.toast.dur) G.toast.on = false;
     }
 
     const h = hero;
@@ -855,19 +972,16 @@
       G.crackleT = 0.08 + Math.random() * 0.45;
       A.crackle(0.03 + h.boostA * 0.04);
     }
-    pressed = {};
+    clearPressed(); // one-shot presses are consumed by the first fixed step that runs
   }
 
   // ------------------------------------------------------------ rendering
-  function setWorld(c) {
-    const z = G.cam.z * S;
-    let sx = 0;
-    let sy = 0;
-    if (G.hurtShake > 0) {
-      sx = (Math.random() - 0.5) * 6 * G.hurtShake;
-      sy = (Math.random() - 0.5) * 6 * G.hurtShake;
-    }
-    c.setTransform(z, 0, 0, z, (-G.cam.x * G.cam.z + sx) * S, (-G.cam.y * G.cam.z + sy) * S);
+  let shakeX = 0;
+  let shakeY = 0;
+  function setWorld(c, scale) {
+    const sc = scale || S;
+    const z = G.cam.z * sc;
+    c.setTransform(z, 0, 0, z, (-G.cam.x * G.cam.z + shakeX) * sc, (-G.cam.y * G.cam.z + shakeY) * sc);
   }
   function setScreen(c) {
     c.setTransform(S, 0, 0, S, 0, 0);
@@ -880,26 +994,14 @@
   function drawSky() {
     const life = G.life;
     setScreen(ctx);
-    if (life <= 0.001) {
-      ctx.fillStyle = '#0D0805';
-      ctx.fillRect(0, 0, W, H);
-      return;
+    ctx.fillStyle = '#0D0805';
+    ctx.fillRect(0, 0, W, H);
+    // the golden-hour sky (pre-rendered once) fades in over the black
+    if (life > 0.001) {
+      ctx.globalAlpha = life;
+      ctx.drawImage(CM.fx.skyAlive, 0, 0, W, H);
+      ctx.globalAlpha = 1;
     }
-    const g = ctx.createLinearGradient(0, 0, 0, H);
-    g.addColorStop(0, U.mix('#0D0805', '#3c74ad', life));
-    g.addColorStop(0.45, U.mix('#0D0805', '#9cc3dc', life));
-    g.addColorStop(0.75, U.mix('#0D0805', '#ffd79a', life));
-    g.addColorStop(1, U.mix('#0D0805', '#f4a95e', life));
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-    // golden sun glow behind the brazier
-    const sx = (L.brazier.x - G.cam.x) * G.cam.z * 0.35 + W * 0.35;
-    const sg = ctx.createRadialGradient(sx, H * 0.62, 0, sx, H * 0.62, 520);
-    sg.addColorStop(0, `rgba(255,236,170,${0.9 * life})`);
-    sg.addColorStop(0.25, `rgba(255,200,110,${0.45 * life})`);
-    sg.addColorStop(1, 'rgba(255,170,80,0)');
-    ctx.fillStyle = sg;
-    ctx.fillRect(0, 0, W, H);
   }
 
   // Painted parallax layer: tiles an image (mirrored copies) across the view.
@@ -936,9 +1038,11 @@
     if (G.life > 0.01) {
       setScreen(ctx);
       // birds
-      ctx.strokeStyle = `rgba(40,40,50,${0.7 * G.life})`;
+      ctx.strokeStyle = '#282832';
+      ctx.globalAlpha = 0.7 * G.life;
       ctx.lineWidth = 1.6;
       for (const b of birds) {
+        if (!b.on) continue;
         const sx = (b.x - G.cam.x) * G.cam.z;
         const fl = Math.sin(b.p) * 5 * b.s;
         ctx.beginPath();
@@ -947,6 +1051,7 @@
         ctx.quadraticCurveTo(sx + 3 * b.s, b.y - 3, sx + 8 * b.s, b.y - fl);
         ctx.stroke();
       }
+      ctx.globalAlpha = 1;
     }
   }
 
@@ -1025,16 +1130,10 @@
   }
 
   // Punch light holes in the darkness layer.
+  // (uses the pre-rendered light stamp: no gradient is built per frame)
   function punch(c, x, y, r, k) {
     if (r <= 1 || k <= 0) return;
-    const g = c.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, `rgba(0,0,0,${k})`);
-    g.addColorStop(0.3, `rgba(0,0,0,${0.93 * k})`);
-    g.addColorStop(0.62, `rgba(0,0,0,${0.5 * k})`);
-    g.addColorStop(0.85, `rgba(0,0,0,${0.14 * k})`);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    c.fillStyle = g;
-    c.fillRect(x - r, y - r, r * 2, r * 2);
+    CM.fx.draw(c, CM.fx.light, x, y, r, k);
   }
 
   // Shadow volume of a convex polygon lit by a point light.
@@ -1083,9 +1182,11 @@
     l.clearRect(0, 0, lc.width, lc.height);
     const da = G.darkAlpha;
     if (da <= 0.003) return false;
-    l.fillStyle = `rgba(8,5,3,${da})`;
+    l.fillStyle = '#080503';
+    l.globalAlpha = da;
     l.fillRect(0, 0, lc.width, lc.height);
-    setWorld(l);
+    l.globalAlpha = 1;
+    setWorld(l, LS);
     const h = hero;
     const R = h.lightR * G.lightFade;
     const fx = h.fx;
@@ -1102,8 +1203,10 @@
       l.beginPath();
       l.rect(fx - R, fy - R, R * 2, GY + 3 - (fy - R));
       l.clip();
-      l.fillStyle = `rgba(8,5,3,${da * 0.8})`;
+      l.fillStyle = '#080503';
+      l.globalAlpha = da * 0.8;
       for (const r of L.rocks) if (Math.abs(r.x + r.w / 2 - fx) < R + 60) castShadow(l, r.pts, fx, fy);
+      l.globalAlpha = 1;
       l.restore();
     }
     l.globalCompositeOperation = 'destination-out';
@@ -1124,22 +1227,15 @@
   function drawLightLayer() {
     if (!renderLighting()) return;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.drawImage(lc, 0, 0);
+    ctx.drawImage(lc, 0, 0, canvas.width, canvas.height); // half-res layer, scaled up (it is soft anyway)
     // warm golden-brown tint inside the light
     setWorld(ctx);
     const h = hero;
     const R = h.lightR * G.lightFade;
     if (R > 2) {
-      ctx.save();
       ctx.globalCompositeOperation = 'overlay';
-      const fy = h.fy;
-      const g = ctx.createRadialGradient(h.fx, fy, 0, h.fx, fy, R * 1.1);
-      g.addColorStop(0, 'rgba(255,150,50,0.55)');
-      g.addColorStop(0.6, 'rgba(200,100,30,0.3)');
-      g.addColorStop(1, 'rgba(160,80,20,0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(h.fx - R * 1.1, fy - R * 1.1, R * 2.2, R * 2.2);
-      ctx.restore();
+      CM.fx.draw(ctx, CM.fx.tint, h.fx, h.fy, R * 1.1, 1);
+      ctx.globalCompositeOperation = 'source-over';
     }
   }
 
@@ -1152,16 +1248,10 @@
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     for (const em of L.drips) {
-      if (em.form > 0.05 && inView(em.x - 10, em.x + 10)) {
-        const g = ctx.createRadialGradient(em.x, em.y + 4, 0, em.x, em.y + 4, 10);
-        g.addColorStop(0, `rgba(170,210,255,${0.55 * em.form})`);
-        g.addColorStop(1, 'rgba(120,170,255,0)');
-        ctx.fillStyle = g;
-        ctx.fillRect(em.x - 10, em.y - 6, 20, 20);
-      }
+      if (em.form > 0.05 && inView(em.x - 10, em.x + 10)) CM.fx.draw(ctx, CM.fx.drip, em.x, em.y + 4, 10, 0.55 * em.form);
     }
+    ctx.fillStyle = 'rgba(150,200,255,0.35)';
     for (const d of drops) {
-      ctx.fillStyle = 'rgba(150,200,255,0.35)';
       ctx.beginPath();
       ctx.arc(d.x, d.y, 3, 0, TAU);
       ctx.fill();
@@ -1178,56 +1268,66 @@
     const b = L.brazier;
     if (b.lit && inView(b.x - 120, b.x + 120)) {
       glow(b.x, D.brazierFireY + 5, 95 * (1 + 0.06 * Math.sin(t * 11) + 0.04 * Math.sin(t * 27)), 0.55 * b.flameA);
-      if (Math.random() < 0.5) spawn({ type: 'spark', x: b.x + (Math.random() - 0.5) * 50, y: D.brazierFireY, vx: (Math.random() - 0.5) * 40, vy: -60 - Math.random() * 80, life: 1.2, max: 1.2, s: 1 + Math.random() * 1.2 });
+
     }
 
     const heroK = h.out ? 0 : G.lightFade * (0.55 + h.flame / 220) * (1 + h.boostA * 0.6);
     D.heroGlow(ctx, h, heroK, t);
 
     // particles
-    for (const p of particles) {
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
       const a = U.clamp(p.life / p.max, 0, 1);
       switch (p.type) {
         case 'spark': {
           ctx.globalCompositeOperation = 'lighter';
-          ctx.fillStyle = `rgba(255,${(150 + 80 * a) | 0},60,${a})`;
+          ctx.fillStyle = SPARK_COL[(a * 16) | 0];
+          ctx.globalAlpha = a;
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.s * (0.5 + a * 0.5), 0, TAU);
           ctx.fill();
+          ctx.globalAlpha = 1;
           ctx.globalCompositeOperation = 'source-over';
           break;
         }
         case 'smoke':
         case 'steam': {
           const lit = lightAt(p.x, p.y);
-          const c = p.type === 'steam' ? '200,210,220' : '110,100,92';
-          ctx.fillStyle = `rgba(${c},${a * (0.12 + 0.3 * lit)})`;
+          ctx.fillStyle = p.type === 'steam' ? '#c8d2dc' : '#6e645c';
+          ctx.globalAlpha = a * (0.12 + 0.3 * lit);
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.s, 0, TAU);
           ctx.fill();
+          ctx.globalAlpha = 1;
           break;
         }
         case 'splash': {
-          ctx.fillStyle = `rgba(180,215,245,${a * (0.3 + 0.6 * lightAt(p.x, p.y))})`;
+          ctx.fillStyle = '#b4d7f5';
+          ctx.globalAlpha = a * (0.3 + 0.6 * lightAt(p.x, p.y));
           ctx.fillRect(p.x - p.s / 2, p.y - p.s / 2, p.s, p.s);
+          ctx.globalAlpha = 1;
           break;
         }
         case 'dust': {
-          ctx.fillStyle = `rgba(120,90,60,${a * 0.5})`;
+          ctx.fillStyle = '#785a3c';
+          ctx.globalAlpha = a * 0.5;
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.s, 0, TAU);
           ctx.fill();
+          ctx.globalAlpha = 1;
           break;
         }
         case 'streak': {
           const lit = 0.08 + 0.4 * lightAt(p.x, p.y);
           const fade = Math.sin(a * Math.PI);
-          ctx.strokeStyle = `rgba(255,225,190,${lit * fade})`;
+          ctx.strokeStyle = '#ffe1be';
+          ctx.globalAlpha = lit * fade;
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.moveTo(p.x, p.y);
           ctx.lineTo(p.x + p.s, p.y + Math.sin(p.x * 0.01) * 2);
           ctx.stroke();
+          ctx.globalAlpha = 1;
           break;
         }
         case 'leaf': {
@@ -1235,7 +1335,8 @@
           ctx.save();
           ctx.translate(p.x, p.y);
           ctx.rotate(p.rot);
-          ctx.fillStyle = `rgba(${(110 * lit) | 0},${(75 * lit) | 0},${(40 * lit) | 0},${Math.min(1, a * 3)})`;
+          ctx.fillStyle = LEAF_COL[(lit * 16) | 0];
+          ctx.globalAlpha = Math.min(1, a * 3);
           ctx.beginPath();
           ctx.ellipse(0, 0, p.s, p.s * 0.45, 0, 0, TAU);
           ctx.fill();
@@ -1245,18 +1346,14 @@
         case 'firefly': {
           ctx.globalCompositeOperation = 'lighter';
           const tw = 0.5 + 0.5 * Math.sin(t * 4 + p.x);
-          const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 9);
-          g.addColorStop(0, `rgba(240,255,150,${0.9 * tw * Math.min(1, a * 3)})`);
-          g.addColorStop(1, 'rgba(200,255,100,0)');
-          ctx.fillStyle = g;
-          ctx.fillRect(p.x - 9, p.y - 9, 18, 18);
+          CM.fx.draw(ctx, CM.fx.firefly, p.x, p.y, 9, 0.9 * tw * Math.min(1, a * 3));
           ctx.globalCompositeOperation = 'source-over';
           break;
         }
         case 'petal': {
           ctx.save();
           ctx.translate(p.x, p.y);
-          ctx.rotate(p.rot || 0);
+          ctx.rotate(p.rot);
           ctx.fillStyle = p.col;
           ctx.globalAlpha = Math.min(1, a * 4);
           ctx.beginPath();
@@ -1270,14 +1367,16 @@
 
     // dust motes floating in the light
     ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = '#ffc882';
     for (const m of motes) {
       const lit = lightAt(m.x, m.y);
       if (lit < 0.03) continue;
-      ctx.fillStyle = `rgba(255,200,130,${lit * 0.7 * (0.6 + 0.4 * Math.sin(t * 3 + m.p))})`;
+      ctx.globalAlpha = lit * 0.7 * (0.6 + 0.4 * Math.sin(t * 3 + m.p));
       ctx.beginPath();
       ctx.arc(m.x, m.y, m.s * 0.8, 0, TAU);
       ctx.fill();
     }
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
 
     drawTexts();
@@ -1285,15 +1384,9 @@
 
   function glow(x, y, r, a) {
     if (a <= 0.01) return;
-    ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, `rgba(255,190,100,${a})`);
-    g.addColorStop(0.35, `rgba(255,120,30,${a * 0.4})`);
-    g.addColorStop(1, 'rgba(255,90,20,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(x - r, y - r, r * 2, r * 2);
-    ctx.restore();
+    CM.fx.draw(ctx, CM.fx.warm, x, y, r, a);
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   function lightAt(x, y) {
@@ -1315,16 +1408,19 @@
     // only the closest hint is shown, so they never overlap
     let near = null;
     for (const tx of L.texts) if (!near || Math.abs(tx.x - hx) < Math.abs(near.x - hx)) near = tx;
-    for (const tx of near ? [near] : []) {
-      const d = tx.x - hx;
+    if (near) {
+      const d = near.x - hx;
       const a = U.clamp(1 - Math.max(0, Math.abs(d + 120) - 180) / 220, 0, 1) * (1 - G.life);
-      if (a <= 0.01) continue;
-      ctx.fillStyle = `rgba(242,205,150,${a * 0.85})`;
-      ctx.shadowColor = 'rgba(255,140,40,0.6)';
-      ctx.shadowBlur = 12;
-      ctx.fillText(isTouch && tx.tt ? tx.tt : tx.t, tx.x + 40, 300);
+      if (a > 0.01) {
+        ctx.fillStyle = '#f2cd96';
+        ctx.globalAlpha = a * 0.85;
+        ctx.shadowColor = 'rgba(255,140,40,0.6)';
+        ctx.shadowBlur = 12;
+        ctx.fillText(isTouch && near.tt ? near.tt : near.t, near.x + 40, 300);
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+      }
     }
-    ctx.shadowBlur = 0;
   }
 
   function roundRect(c, x, y, w, h, r) {
@@ -1337,18 +1433,55 @@
     c.closePath();
   }
 
+  let hudFlameVal = -1;
+  let hudFlameText = '';
+
+  // ------------------------------------------------------------ FPS counter (F key, ?fps, or two-finger tap)
+  const fps = { on: /[?&]fps/.test(location.search), frames: 0, t: 0, value: 0, ms: 0, text: '' };
+  window.addEventListener(
+    'touchstart',
+    (e) => {
+      if (e.touches.length === 2 && !e.target.closest('.tbtn')) fps.on = !fps.on;
+    },
+    { passive: true }
+  );
+  function countFps(dtReal) {
+    fps.frames++;
+    fps.t += dtReal;
+    if (fps.t >= 0.5) {
+      fps.value = Math.round(fps.frames / fps.t);
+      fps.ms = (fps.t * 1000) / fps.frames;
+      fps.text = fps.value + ' FPS  ' + fps.ms.toFixed(1) + ' ms';
+      fps.frames = 0;
+      fps.t = 0;
+    }
+  }
+  function drawFps() {
+    if (!fps.on) return;
+    setScreen(ctx);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(10, H - 36, 150, 26);
+    ctx.font = '700 14px Menlo, Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.direction = 'ltr';
+    ctx.fillStyle = fps.value >= 55 ? '#7dff8a' : fps.value >= 40 ? '#ffd35a' : '#ff6a5a';
+    ctx.fillText(fps.text, 18, H - 18);
+  }
+
   function drawHUD() {
     setScreen(ctx);
     // vignette
-    const vg = ctx.createRadialGradient(W / 2, H * 0.55, H * 0.35, W / 2, H * 0.55, H * 0.95);
-    vg.addColorStop(0, 'rgba(0,0,0,0)');
-    vg.addColorStop(1, `rgba(0,0,0,${0.65 - 0.4 * G.life})`);
-    ctx.fillStyle = vg;
-    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 0.65 - 0.4 * G.life;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(CM.fx.vignette, 0, 0); // 1:1, no scaling
+    setScreen(ctx);
+    ctx.globalAlpha = 1;
 
     if (G.flash > 0) {
-      ctx.fillStyle = `rgba(120,170,230,${G.flash * 0.35})`;
+      ctx.fillStyle = '#78aae6';
+      ctx.globalAlpha = G.flash * 0.35;
       ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
     }
     if (G.state === 'menu') return;
 
@@ -1366,7 +1499,12 @@
       ctx.textAlign = 'right';
       ctx.direction = 'rtl';
       ctx.fillStyle = '#f2cf96';
-      ctx.fillText(`قوة الشعلة  ${Math.round(h.flame)}`, W - 72, 40);
+      const fv = Math.round(h.flame);
+      if (fv !== hudFlameVal) {
+        hudFlameVal = fv;
+        hudFlameText = 'قوة الشعلة  ' + fv; // rebuilt only when the number changes
+      }
+      ctx.fillText(hudFlameText, W - 72, 40);
       D.flame(ctx, W - 52, 42, 22, Math.sin(G.time) * 0.1, G.time, 9);
       // bar
       ctx.translate(shake, 0);
@@ -1379,17 +1517,16 @@
       const fw = (bw - 4) * U.clamp(h.flameShown / 100, 0, 1);
       if (fw > 1) {
         const low = h.flame < 25;
-        const g = ctx.createLinearGradient(bx + bw - fw, 0, bx + bw, 0);
-        g.addColorStop(0, low ? '#ff3b1a' : '#ff5a1a');
-        g.addColorStop(0.6, low ? '#ff7a2a' : '#FF9A1F');
-        g.addColorStop(1, '#ffe7a6');
+        ctx.save();
         roundRect(ctx, bx + bw - 2 - fw, by + 2, fw, 10, 5);
-        ctx.fillStyle = g;
-        ctx.fill();
+        ctx.clip();
+        ctx.drawImage(low ? CM.fx.barLow : CM.fx.bar, bx + bw - 2 - fw, by + 2, fw, 10);
         if (low) {
-          ctx.fillStyle = `rgba(255,60,20,${0.25 + 0.25 * Math.sin(G.time * 10)})`;
-          ctx.fill();
+          ctx.fillStyle = '#ff3c14';
+          ctx.globalAlpha = hudA * (0.25 + 0.25 * Math.sin(G.time * 10));
+          ctx.fillRect(bx + bw - 2 - fw, by + 2, fw, 10);
         }
+        ctx.restore();
       }
       // boost indicator
       const ready = h.boostCd <= 0;
@@ -1418,17 +1555,19 @@
     }
 
     // toast
-    if (G.toast) {
+    if (G.toast.on) {
       const tt = G.toast;
       const a = U.smooth(0, 0.4, tt.t) * (1 - U.smooth(tt.dur - 0.6, tt.dur, tt.t));
       ctx.font = '700 28px "Reem Kufi", Cairo, Tahoma, sans-serif';
       ctx.textAlign = 'center';
       ctx.direction = 'rtl';
-      ctx.fillStyle = `rgba(255,214,150,${a})`;
+      ctx.fillStyle = '#ffd696';
+      ctx.globalAlpha = U.clamp(a, 0, 1);
       ctx.shadowColor = 'rgba(255,120,30,0.8)';
       ctx.shadowBlur = 18;
       ctx.fillText(tt.text, W / 2, 130);
       ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
     }
 
     if (G.paused) {
@@ -1453,6 +1592,7 @@
     drawLightLayer();
     drawEmissive();
     drawHUD();
+    drawFps();
   }
 
   // ------------------------------------------------------------ loop
@@ -1464,6 +1604,7 @@
   }
   CM.onAssets(() => {
     startBtn.disabled = false;
+    D.prepare();
     if (startBtn.dataset.label) startBtn.textContent = startBtn.dataset.label;
     // the living forest panorama fades softly into the sky at its top edge
     const im = CM.img.forest_alive;
@@ -1495,19 +1636,61 @@
     ctx.fillRect(W / 2 - 150, H - 80, 300 * p, 4);
   }
 
+  // Fixed timestep: the game simulates exactly 60 steps per second whatever the screen's
+  // refresh rate (60 / 120 Hz, slow device…). Drawing interpolates between the last two
+  // steps so motion stays smooth even when a frame does not line up with a step.
+  const STEP = 1 / 60;
+  const MAX_STEPS = 5; // after a long hitch (tab switch…) skip ahead instead of spiralling
+  let acc = 0;
   let last = performance.now();
+  const prev = { hx: 0, hy: 0, cx: 0, cy: 0, cz: 1 };
+
   function frame(now) {
     let dt = (now - last) / 1000;
     last = now;
-    if (dt > 0.05) dt = 0.05;
-    // two physics sub-steps keep collisions solid at low frame rates
-    const steps = dt > 1 / 70 ? 2 : 1;
+    countFps(dt);
+    if (dt > 0.25) dt = 0.25;
+    acc += dt;
     handleMetaKeys();
-    for (let i = 0; i < steps; i++) update(dt / steps);
-    pressed = {};
+    let steps = 0;
+    while (acc >= STEP && steps < MAX_STEPS) {
+      prev.hx = hero.x;
+      prev.hy = hero.y;
+      prev.cx = G.cam.x;
+      prev.cy = G.cam.y;
+      prev.cz = G.cam.z;
+      update(STEP);
+      acc -= STEP;
+      steps++;
+    }
+    if (steps === MAX_STEPS) acc = 0;
     syncTouchUI();
-    if (CM.assetsReady) render();
-    else drawLoading();
+    if (CM.assetsReady) {
+      // interpolate positions between the previous and the current step
+      const a = G.paused ? 1 : acc / STEP;
+      const hx = hero.x;
+      const hy = hero.y;
+      const cx = G.cam.x;
+      const cy = G.cam.y;
+      const cz = G.cam.z;
+      if (Math.abs(hx - prev.hx) < 60 && Math.abs(hy - prev.hy) < 60) {
+        hero.x = U.lerp(prev.hx, hx, a);
+        hero.y = U.lerp(prev.hy, hy, a);
+      }
+      if (Math.abs(cx - prev.cx) < 200) {
+        G.cam.x = U.lerp(prev.cx, cx, a);
+        G.cam.y = U.lerp(prev.cy, cy, a);
+        G.cam.z = U.lerp(prev.cz, cz, a);
+      }
+      shakeX = G.hurtShake > 0 ? (Math.random() - 0.5) * 6 * G.hurtShake : 0;
+      shakeY = G.hurtShake > 0 ? (Math.random() - 0.5) * 6 * G.hurtShake : 0;
+      render();
+      hero.x = hx;
+      hero.y = hy;
+      G.cam.x = cx;
+      G.cam.y = cy;
+      G.cam.z = cz;
+    } else drawLoading();
     requestAnimationFrame(frame);
   }
 
@@ -1524,6 +1707,7 @@
       return L;
     },
     start: startGame,
+    fps,
     teleport(x) {
       hero.climb = null;
       hero.x = x;

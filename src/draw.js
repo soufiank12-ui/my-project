@@ -27,14 +27,7 @@
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const gx = x + tip * 0.3;
-    const gy = y - h * 0.4;
-    const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, h * 1.4);
-    g.addColorStop(0, 'rgba(255,170,60,0.42)');
-    g.addColorStop(0.35, 'rgba(255,115,30,0.16)');
-    g.addColorStop(1, 'rgba(255,80,20,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(gx - h * 1.4, gy - h * 1.4, h * 2.8, h * 2.8);
+    CM.fx.draw(ctx, CM.fx.flameHalo, x + tip * 0.3, y - h * 0.4, h * 1.4, 1);
     ctx.globalCompositeOperation = 'source-over';
 
     ctx.shadowColor = 'rgba(255,90,20,0.9)';
@@ -61,20 +54,21 @@
 
   // ---------------------------------------------------------------- hero (painted sprites)
   const HM = CM.HERO;
+  const JUMP_UP = ['jump_up_1', 'jump_up_2', 'jump_up_3', 'jump_up_4', 'jump_up_5', 'jump_up_6'];
+  const JUMP_LAND = ['jump_land_1', 'jump_land_2', 'jump_land_3', 'jump_land_4', 'jump_land_5', 'jump_land_6'];
 
   function heroFrame(h) {
     if (h.out) return 'out';
     if (h.climb) return HM.climb[h.climbFrame % HM.climb.length];
     if (h.pose === 'boost') return 'boost';
-    const ja = h.jumpAnim;
     if (!h.onGround) {
-      // rising: take-off frames 1→6, then hold frame 6 at the top of the jump
-      if (ja && ja.phase === 'up' && h.vy < 100) return 'jump_up_' + Math.min(6, 1 + Math.floor(ja.t / 0.05));
-      if (h.vy < 0) return 'jump_up_6';
-      return 'jump_land_1'; // falling
+      // rising: take-off frames 1→6 (timed), then hold frame 6 at the top of the jump
+      if (h.jaPhase === 'up' && h.vy < 100) return JUMP_UP[Math.min(5, Math.floor(h.jaT / 0.05))];
+      if (h.vy < 0) return JUMP_UP[5];
+      return JUMP_LAND[0]; // falling
     }
     // touched the ground: the rest of the landing frames
-    if (ja && ja.phase === 'land' && ja.t < 0.3) return 'jump_land_' + Math.min(6, 2 + Math.floor(ja.t / 0.06));
+    if (h.jaPhase === 'land' && h.jaT < 0.3) return JUMP_LAND[Math.min(5, 1 + Math.floor(h.jaT / 0.06))];
     if (h.walkAmt > 0.35) return HM.walk[Math.floor(h.walkPh / 1.25) % HM.walk.length];
     return 'idle';
   }
@@ -82,7 +76,7 @@
   // Draws the candle man. Writes the flame anchor (light source) back into h.fx / h.fy.
   D.hero = function (ctx, h, t) {
     const name = heroFrame(h);
-    const im = CM.img['hero_' + name];
+    const im = CM.heroImg[name];
     const k = 1 / HM.px;
     // on a rock face he presses against the stone, not beside it
     const cx = h.x + h.w / 2 + (h.climb && h.climb.kind === 'rock' ? h.climb.side * 9 : 0);
@@ -109,16 +103,7 @@
     if (h.climb) return;
     const cx = h.x + h.w / 2 - h.facing * 14;
     const by = h.y + h.h + 1;
-    const g = ctx.createRadialGradient(cx, by, 0, cx, by, 40);
-    g.addColorStop(0, 'rgba(0,0,0,0.6)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.save();
-    ctx.translate(cx, by);
-    ctx.scale(1, 0.14);
-    ctx.translate(-cx, -by);
-    ctx.fillRect(cx - 40, by - 40, 80, 80);
-    ctx.restore();
+    CM.fx.draw(ctx, CM.fx.shadow, cx, by, 40, 1, 0.14);
   };
 
   // Soft light passing through the wax + around the flame (drawn additively after the darkness).
@@ -126,21 +111,9 @@
     if (k <= 0) return;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const cx = h.x + h.w / 2;
-    const y = h.y + 12;
-    let g = ctx.createRadialGradient(cx, y, 0, cx, y, 32);
-    g.addColorStop(0, `rgba(255,160,60,${0.22 * k})`);
-    g.addColorStop(1, 'rgba(255,140,40,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(cx - 32, y - 32, 64, 64);
+    CM.fx.draw(ctx, CM.fx.bodyGlow, h.x + h.w / 2, h.y + 12, 32, 0.22 * k);
     const fl = 1 + 0.08 * Math.sin(t * 17) + 0.05 * Math.sin(t * 29);
-    const r = 34 * fl * Math.min(1.6, k);
-    g = ctx.createRadialGradient(h.fx, h.fy, 0, h.fx, h.fy, r);
-    g.addColorStop(0, `rgba(255,200,110,${0.35 * k})`);
-    g.addColorStop(0.4, `rgba(255,120,30,${0.14 * k})`);
-    g.addColorStop(1, 'rgba(255,90,20,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(h.fx - r, h.fy - r, r * 2, r * 2);
+    CM.fx.draw(ctx, CM.fx.flameGlow, h.fx, h.fy, 34 * fl * Math.min(1.6, k), 0.35 * k);
     ctx.restore();
   };
 
@@ -188,12 +161,7 @@
     const y = e.y + Math.sin(t * 2 + e.x) * 4;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const g = ctx.createRadialGradient(e.x, y, 0, e.x, y, 18);
-    g.addColorStop(0, 'rgba(255,240,190,0.95)');
-    g.addColorStop(0.25, 'rgba(255,160,50,0.6)');
-    g.addColorStop(1, 'rgba(255,90,20,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(e.x - 18, y - 18, 36, 36);
+    CM.fx.draw(ctx, CM.fx.ember, e.x, y, 18, 1);
     ctx.restore();
   };
 
@@ -207,6 +175,7 @@
     ctx.globalAlpha = 1;
   };
 
+  let earthGrad = null;
   const GROUND_H = 86; // drawn height of the ground tile
   const GROUND_TOP = 30; // where the dirt starts inside the tile image (above it: grass tufts)
   D.ground = function (ctx, g) {
@@ -215,11 +184,15 @@
     const tw = im.width * s;
     const y0 = g.y - GROUND_TOP * s;
     // deep earth under the strip
-    const gr = ctx.createLinearGradient(0, y0 + GROUND_H - 10, 0, g.y + 260);
-    gr.addColorStop(0, '#1d130b');
-    gr.addColorStop(1, '#070403');
-    ctx.fillStyle = gr;
-    ctx.fillRect(g.x, y0 + GROUND_H - 10, g.w, 420);
+    const ey = y0 + GROUND_H - 10;
+    // every ground strip sits at the same height, so one gradient (built once) serves them all
+    if (!earthGrad) {
+      earthGrad = ctx.createLinearGradient(0, ey, 0, g.y + 260);
+      earthGrad.addColorStop(0, '#1d130b');
+      earthGrad.addColorStop(1, '#070403');
+    }
+    ctx.fillStyle = earthGrad;
+    ctx.fillRect(g.x, ey, g.w, 420);
     ctx.save();
     ctx.beginPath();
     ctx.rect(g.x, y0 - 2, g.w, GROUND_H + 4);
@@ -227,14 +200,12 @@
     CM.tileMirrored(ctx, im, 0, y0, tw + 0.6, GROUND_H, g.x, g.x + g.w, tw);
     ctx.restore();
     // rounded, darker cliff edges
-    for (const side of [0, 1]) {
-      const x = side ? g.x + g.w : g.x;
-      const eg = ctx.createLinearGradient(x, 0, x + (side ? -18 : 18), 0);
-      eg.addColorStop(0, 'rgba(5,3,2,0.9)');
-      eg.addColorStop(1, 'rgba(5,3,2,0)');
-      ctx.fillStyle = eg;
-      ctx.fillRect(side ? x - 18 : x, g.y - 2, 18, 420);
-    }
+    ctx.drawImage(CM.fx.edge, g.x, g.y - 2, 18, 420);
+    ctx.save();
+    ctx.translate(g.x + g.w, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(CM.fx.edge, 0, g.y - 2, 18, 420);
+    ctx.restore();
   };
 
   // The rock image: the stone fills ~76% of its width and ~90% of its height (the rest is grass).
@@ -277,8 +248,9 @@
     c.drawImage(barkV, 0, 0);
   }
 
+  D.prepare = makeBark; // called once when the images have loaded
+
   D.log = function (ctx, lg) {
-    makeBark();
     if (!barkH) return;
     const { x1, x2, y, h } = lg;
     // supports: two snapped trunks
@@ -295,12 +267,7 @@
       ctx.closePath();
       ctx.clip();
       ctx.drawImage(barkV, sx - 26, y - 16, 52, CM.GY + 24 - y);
-      const sg = ctx.createLinearGradient(sx - 24, 0, sx + 24, 0);
-      sg.addColorStop(0, 'rgba(0,0,0,0.6)');
-      sg.addColorStop(0.5, 'rgba(0,0,0,0)');
-      sg.addColorStop(1, 'rgba(0,0,0,0.65)');
-      ctx.fillStyle = sg;
-      ctx.fillRect(sx - 26, y - 16, 52, CM.GY + 24 - y);
+      ctx.drawImage(CM.fx.trunkShade, sx - 24, y - 16, 48, CM.GY + 24 - y);
       ctx.restore();
     }
     // the trunk itself
@@ -321,12 +288,7 @@
     ctx.clip();
     const tw = barkH.width * ((h + 8) / barkH.height);
     CM.tileMirrored(ctx, barkH, x1 - 4, y - 4, tw + 0.5, h + 8, x1 - 4, x2 + 6, tw);
-    const g = ctx.createLinearGradient(0, y, 0, y + h);
-    g.addColorStop(0, 'rgba(255,190,120,0.08)');
-    g.addColorStop(0.45, 'rgba(0,0,0,0)');
-    g.addColorStop(1, 'rgba(0,0,0,0.6)');
-    ctx.fillStyle = g;
-    ctx.fillRect(x1 - 4, y - 4, x2 - x1 + 10, h + 8);
+    ctx.drawImage(CM.fx.logShade, x1 - 4, y, x2 - x1 + 10, h);
     ctx.restore();
   };
 
